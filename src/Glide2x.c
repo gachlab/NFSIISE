@@ -2,52 +2,80 @@
 
 #include "Glide2x.h"
 
+#include <SDL2/SDL_video.h>
+#include <SDL2/SDL_timer.h>
+
+/*
+ * Frame rate reporting, off unless NFS2SE_FPS is set in the environment.
+ *
+ * It lives here rather than in a backend so that every backend reports the same
+ * measurement, taken at the same point in the frame -- which is the only way an
+ * A/B between them means anything. Each backend calls it from grBufferSwap.
+ * Remember to set VSync=0 in nfs2se.conf, or all you measure is the refresh rate.
+ */
+static void countFrame(void);
+
 static inline void handleDpr();
-static inline BOOL clearUnusedArea(int32_t xOffset, int32_t yOffset, int32_t visibleWidth, int32_t visibleHeight);
 static inline void convertColor(GrColor_t color, uint8_t *alpha, float *r, float *g, float *b, float *a);
 
-#ifdef OPENGL1X
+/*
+ * Implemented by the selected backend.
+ *
+ * clearUnusedArea() blacks out the letterbox/pillarbox bars and returns whether
+ * it did anything. It lives in the backend because clearing is expressed in
+ * completely different terms per API (glClear+scissor, vkCmdClearAttachments,
+ * MTLRenderPassDescriptor load actions), and because the scissor origin differs
+ * (OpenGL measures Y from the bottom, Vulkan and Metal from the top).
+ *
+ * backendGetDrawableSize() reports the drawable size in physical pixels, which
+ * is how the HiDPI ratio is derived.
+ */
+static inline BOOL clearUnusedArea(int32_t xOffset, int32_t yOffset, int32_t visibleWidth, int32_t visibleHeight);
+static inline void backendGetDrawableSize(SDL_Window *win, int *w, int *h);
+
+#if defined(VULKAN)
+	#include "Glide2x/Vulkan.c"
+#elif defined(METAL)
+	#include "Glide2x/Metal.m"
+#elif defined(OPENGL1X)
 	#include "Glide2x/OpenGL1.c"
 #else
 	#include "Glide2x/OpenGL2.c"
 #endif
+
+static void countFrame(void)
+{
+	static int32_t enabled = -1;
+	static uint32_t frames, windowStart;
+	uint32_t now;
+
+	if (enabled < 0)
+		enabled = (getenv("NFS2SE_FPS") != NULL);
+	if (!enabled)
+		return;
+
+	now = SDL_GetTicks();
+	if (windowStart == 0)
+		windowStart = now;
+
+	++frames;
+	if (now - windowStart >= 1000)
+	{
+		fprintf(stderr, "FPS: %.1f\n", frames * 1000.0f / (float)(now - windowStart));
+		frames = 0;
+		windowStart = now;
+	}
+}
 
 static inline void handleDpr()
 {
 	extern float dpr;
 	SDL_GetWindowSize(sdlWin, &winWidth, &winHeight);
 	int w = winWidth, h = winHeight;
-	SDL_GL_GetDrawableSize(sdlWin, &w, &h);
+	backendGetDrawableSize(sdlWin, &w, &h);
 	dpr = ((float)w / (float)winWidth + (float)h / (float)winHeight) / 2.0f;
 	winWidth  *= dpr;
 	winHeight *= dpr;
-}
-static inline BOOL clearUnusedArea(int32_t xOffset, int32_t yOffset, int32_t visibleWidth, int32_t visibleHeight)
-{
-	if (keepAspectRatio && (xOffset > 0 || yOffset > 0))
-	{
-		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-		if (xOffset > 0)
-		{
-			glScissor(0, 0, xOffset, winHeight);
-			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-
-			glScissor(xOffset + visibleWidth, 0, winWidth - visibleWidth - xOffset, winHeight);
-			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-		}
-		if (yOffset > 0)
-		{
-			// Y starts from bottom
-
-			glScissor(0, 0, winWidth, winHeight - visibleHeight - yOffset);
-			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-
-			glScissor(0, yOffset + visibleHeight, winWidth, yOffset + 1);
-			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
-		}
-		return true;
-	}
-	return false;
 }
 static inline void convertColor(GrColor_t color, uint8_t *alpha, float *r, float *g, float *b, float *a)
 {

@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+#
+# SPDX-License-Identifier: MIT
+#
+# Fair A/B between the graphics backends: same machine, same GPU, same scene,
+# same measurement point (countFrame() in Glide2x.c, called from grBufferSwap).
+#
+# Run this from a real graphical session -- NOT over plain SSH into Xvfb, which
+# has no DRI3 and silently falls back to llvmpipe, so you would be benchmarking
+# a software rasteriser.
+#
+# Usage: ./tools/bench_backends [measure_seconds] [backend...]
+#        ./tools/bench_backends 40 gl2 vulkan
+
+set -e
+
+cd "$(dirname "$0")/.."
+
+MEASURE_SECONDS=${1:-40}
+shift || true
+BACKENDS=("$@")
+if [ ${#BACKENDS[@]} -eq 0 ]; then
+	BACKENDS=(gl2 vulkan)
+fi
+
+# Seconds allowed for the track to load after starting a race, before any sample
+# counts. Loading is disk- and CPU-bound and would drag the median down.
+LOAD_SECONDS=${LOAD_SECONDS:-20}
+
+# Where "RACE" sits in the game's 640x480 logical frame. The game letterboxes to
+# 4:3 inside whatever window it gets, so this is mapped through the actual
+# window geometry at run time rather than hardcoded in screen pixels.
+RACE_X_FRACTION=0.208
+RACE_Y_FRACTION=0.694
+
+GAMEDIR="Need For Speed II SE"
+CONF="$GAMEDIR/nfs2se.conf"
+
+if [ ! -f "$CONF" ]; then
+	echo "$CONF not found -- copy it from nfs2se.conf.template first." >&2
+	exit 1
+fi
+
+if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
+	echo "No DISPLAY or WAYLAND_DISPLAY. Run this from a graphical session," >&2
+	echo "otherwise you will be timing llvmpipe rather than the GPU." >&2
+	exit 1
+fi
+
+# Force SDL onto X11/XWayland. xdotool drives the game through XTEST, which
+# cannot reach native Wayland windows at all -- without this the intro is never
+# skipped and every backend gets timed on the wrong scene. Both backends get
+# the same presentation path, so the comparison stays fair.
+export SDL_VIDEODRIVER=x11
+
+if ! command -v xdotool > /dev/null 2>&1; then
+	echo "xdotool not found -- needed to skip the intro. sudo apt install xdotool" >&2
+	exit 1
+fi
+
+# Clicks a point given in the game's 640x480 logical frame, mapping it through
+# the window's real geometry and the 4:3 letterbox the game keeps inside it.
+click_logical() {
+	local win=$1 fx=$2 fy=$3
+	local X Y WIDTH HEIGHT
+
+	eval "$(xdotool getwindowgeometry --shell "$win")"
+
+	# Largest 4:3 box centred in the window, matching KeepAspectRatio=1.
+	local content_w content_h off_x off_y
+	content_w=$(awk -v w="$WIDTH" -v h="$HEIGHT" 'BEGIN{ c=h*4/3; print (c<w)?c:w }')
+	content_h=$(awk -v cw="$content_w" 'BEGIN{ print cw*3/4 }')
+	off_x=$(awk -v w="$WIDTH"  -v c="$content_w" 'BEGIN{ print (w-c)/2 }')
+	off_y=$(awk -v h="$HEIGHT" -v c="$content_h" 'BEGIN{ print (h-c)/2 }')
+
+	local px py
+	px=$(awk -v x="$X" -v o="$off_x" -v c="$content_w" -v f="$fx" 'BEGIN{ printf "%d", x+o+c*f }')
+	py=$(awk -v y="$Y" -v o="$off_y" -v c="$content_h" -v f="$fy" 'BEGIN{ printf "%d", y+o+c*f }')
+
+	xdotool mousemove --sync "$px" "$py" 2>/dev/null || true
+	sleep 0.5
+	# Press and release as separate events with a hold in between. An instant
+	# `xdotool click` is too short for the game's input polling to ever observe
+	# the button down, and the menu item never fires.
+	xdotool mousedown 1 2>/dev/null || true
+	sleep 0.25
+	xdotool mouseup 1 2>/dev/null || true
+}
+
+# Any stray instance would fight this one for the GPU and wreck the numbers.
+kill_game() {
+	pkill -x nfs2se 2>/dev/null || true
+	for _ in $(seq 20); do
+		pgrep -x nfs2se > /dev/null 2>&1 || return 0
+		sleep 0.25
+	done
+	pkill -9 -x nfs2se 2>/dev/null || true
+	sleep 0.5
+}
+
+# The game paces itself with a fixed-rate timer (src/Timer.c), so on any modern
+# GPU at 640x480 every backend simply saturates that cap and reports the same
+# number -- the game is the bottleneck, not the renderer. To compare backends at
+# all, the GPU has to be made the limit. The offscreen target is sized from the
+# window's shorter edge, so a big window means a proportionally bigger render
+# target. Set BENCH_RESOLUTION=WxH (e.g. 3840x2160) to push past the cap.
+BENCH_RESOLUTION=${BENCH_RESOLUTION:-}
+
+# VSync pins every backend to the refresh rate, which would make them all look
+# identical. Turn it off for the duration and put it back afterwards.
+cp "$CONF" "$CONF.bench-backup"
+cleanup() {
+	kill_game
+	mv -f "$CONF.bench-backup" "$CONF" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+sed -i 's/^VSync=.*/VSync=0/' "$CONF"
+
+if [ -n "$BENCH_RESOLUTION" ]; then
+	sed -i "s/^WindowSize=.*/WindowSize=$BENCH_RESOLUTION/" "$CONF"
+	# Windowed, so the requested size is honoured rather than snapped to a mode.
+	sed -i 's/^StartInFullScreen=.*/StartInFullScreen=0/' "$CONF"
+fi
+
+kill_game
+
+echo "Benchmarking: start a race, ${LOAD_SECONDS}s to load, then ${MEASURE_SECONDS}s measured"
+echo "Backends: ${BACKENDS[*]}"
+echo "Resolution: ${BENCH_RESOLUTION:-as configured}"
+echo
+echo "NOTE: the game self-limits to ~64 fps (src/Timer.c). If every backend"
+echo "      reports the same flat number, they are all hitting that cap and the"
+echo "      GPU is idle -- re-run with a much larger BENCH_RESOLUTION."
+echo
+
+for backend in "${BACKENDS[@]}"; do
+	case "$backend" in
+		gl2)    flag="" ;;
+		gl1)    flag="gl1" ;;
+		vulkan) flag="vulkan" ;;
+		*) echo "Unknown backend: $backend" >&2; exit 1 ;;
+	esac
+
+	printf '%-8s building... ' "$backend"
+	./compile_nfs $flag > /dev/null 2>&1
+
+	log=$(mktemp)
+
+	# `exec` matters: without it $! is the subshell's PID, and killing the
+	# subshell leaves the game orphaned and still rendering -- which is how the
+	# next backend ends up running on top of the previous one.
+	( cd "$GAMEDIR" && exec env NFS2SE_FPS=1 ./nfs2se > "$log" 2>&1 ) &
+	gamepid=$!
+
+	printf 'starting race... '
+
+	# Get past the intro movie. `xdotool key` without --window goes through
+	# XTEST, which SDL honours; `--window` uses XSendEvent, which SDL ignores.
+	# Exactly ONE Escape: at the menu a second one opens "exit to system?".
+	sleep 6
+	win=""
+	for _ in $(seq 15); do
+		win=$(xdotool search --name "Need For Speed" 2>/dev/null | head -1 || true)
+		[ -n "$win" ] && break
+		sleep 1
+	done
+	if [ -z "$win" ]; then
+		echo "game window never appeared"
+		kill_game; rm -f "$log"; continue
+	fi
+	# windowfocus, not windowactivate: the latter needs a window manager
+	# advertising _NET_ACTIVE_WINDOW, which a bare X server does not have.
+	xdotool windowfocus --sync "$win" 2>/dev/null || true
+	xdotool key Escape 2>/dev/null || true
+
+	# Let the menu settle, then start a race. Do NOT rely on the attract demo:
+	# it alternates with the menu on its own schedule, so a fixed time window
+	# lands on 2D menu frames as often as on the 3D scene we want to compare.
+	sleep 8
+	xdotool windowfocus --sync "$win" 2>/dev/null || true
+	click_logical "$win" "$RACE_X_FRACTION" "$RACE_Y_FRACTION"
+
+	printf 'loading... '
+	sleep "$LOAD_SECONDS"
+
+	# Everything logged so far is intro, menu and track load.
+	warmup_samples=$(grep -c 'FPS: ' "$log" 2>/dev/null || echo 0)
+
+	# Proof of what is being timed. Without this, a median is just a number and
+	# you cannot tell a race from the menu -- which is exactly how this script
+	# got it wrong the first time.
+	if [ -n "$BENCH_SHOT" ] && command -v import > /dev/null 2>&1; then
+		import -window root "bench_${backend}.png" 2>/dev/null || true
+	fi
+
+	printf 'measuring... '
+	sleep "$MEASURE_SECONDS"
+
+	kill "$gamepid" 2>/dev/null || true
+	kill_game
+	wait "$gamepid" 2>/dev/null || true
+
+	samples=$(grep -oP 'FPS: \K[0-9.]+' "$log" 2>/dev/null | tail -n +$((warmup_samples + 1)) || true)
+	count=$(printf '%s\n' "$samples" | grep -c . || true)
+
+	if [ "${count:-0}" -lt 3 ]; then
+		echo "only $count samples -- did the race actually start?"
+		echo "         (log kept at $log; set BENCH_SHOT=1 to capture the screen)"
+		continue
+	fi
+
+	read -r median min max <<< "$(printf '%s\n' "$samples" | sort -n | awk '
+		{a[NR]=$1}
+		END {
+			m = (NR%2) ? a[(NR+1)/2] : (a[NR/2]+a[NR/2+1])/2
+			printf "%.1f %.1f %.1f", m, a[1], a[NR]
+		}')"
+
+	printf 'median %6s fps   (min %s, max %s, n=%d)\n' "$median" "$min" "$max" "$count"
+	rm -f "$log"
+done
+
+echo
+echo "Median over the measured window only; intro and menu excluded."

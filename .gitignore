@@ -10,3 +10,11 @@ src/Android/.gradle
 src/Android/app/build
 src/Android/app/jni/SDL
 src/Android/app/src/main/AndroidManifest.xml
+
+# Built by tools/build_replay and tools/bench_backends
+tools/glide_replay_*
+!tools/glide_replay.c
+*.dSYM
+bench_*.png
+Need For Speed II SE/nfs2se.conf
+Need For Speed II SE/nfs2se.conf.bench-backup

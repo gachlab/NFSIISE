@@ -5,6 +5,11 @@ BUILD_TYPE="release"
 BUILD_WINDOWS="no"
 OPENGL_DEFINE=""
 OPENGL_LIBS="-lGL"
+# Graphics libraries per platform. Overridden below when a backend needs
+# something other than OpenGL.
+WIN_GFX_LIBS="-lopengl32"
+MAC_GFX_LIBS="-framework OpenGL"
+MAC_GFX_FLAGS=""
 ANDROID_INSTALL="no"
 CPP_LTO="-flto"
 
@@ -36,15 +41,15 @@ function compile_x86
 		i686-w64-mingw32-windres Windows/nfs2se.rc icon.o &&
 		i686-w64-mingw32-gcc $C_FLAGS $OPENGL_DEFINE -c *.c &&
 		yasm -f win32 Asm/NFS2SE.asm -o NFS2SE.Win32.o $DEBUG_ASM --prefix=_ &&
-		i686-w64-mingw32-ld --enable-stdcall-fixup -o "../Need For Speed II SE/nfs2se.exe" *.o --stack=0x7D00,0x7D00 --heap=0x2000,0x1000 -lws2_32 -lwinmm -lmingwex -lmsvcrt -lkernel32 -lopengl32 -lSDL2 -subsystem=$WIN_SUBSYSTEM $STRIP -e _start &&
+		i686-w64-mingw32-ld --enable-stdcall-fixup -o "../Need For Speed II SE/nfs2se.exe" *.o --stack=0x7D00,0x7D00 --heap=0x2000,0x1000 -lws2_32 -lwinmm -lmingwex -lmsvcrt -lkernel32 $WIN_GFX_LIBS -lSDL2 -subsystem=$WIN_SUBSYSTEM $STRIP -e _start &&
 		rm -f *.o &&
 		echo "OK!"
 	else
 		if [ $OS == "Darwin" ]; then
 			echo -n " macOS... "
-			clang $C_FLAGS $OPENGL_DEFINE -DSTACK_REALIGN -DSWAP_WINDOW_AND_GL_THREAD -c *.c -mmacosx-version-min=10.6 &&
+			clang $C_FLAGS $MAC_GFX_FLAGS $OPENGL_DEFINE -DSTACK_REALIGN -DSWAP_WINDOW_AND_GL_THREAD -c *.c -mmacosx-version-min=10.6 &&
 			yasm -f macho Asm/NFS2SE.asm -o NFS2SE.OSX.o --prefix=_ -DSWAP_WINDOW_AND_GL_THREAD &&
-			ld -o "../Need For Speed II SE/nfs2se" *.o -lc -lSDL2 -framework OpenGL -macosx_version_min 10.6 -e _start &&
+			ld -o "../Need For Speed II SE/nfs2se" *.o -lc -lSDL2 $MAC_GFX_LIBS -macosx_version_min 10.6 -e _start &&
 			rm -f *.o &&
 			echo "OK!"
 		else
@@ -116,6 +121,16 @@ do
 			OPENGL_DEFINE="-DGLES2"
 			OPENGL_LIBS="-lGLESv2"
 		;;
+		vulkan)
+			OPENGL_DEFINE="-DVULKAN"
+			OPENGL_LIBS="-lvulkan"
+			WIN_GFX_LIBS="-lvulkan-1"
+			# On macOS the loader dispatches to MoltenVK. Note that a 32-bit
+			# build cannot run here anyway (macOS dropped 32-bit in Catalina);
+			# this path exists for a future 64-bit port and for tools/build_replay.
+			MAC_GFX_LIBS="-lvulkan"
+			MAC_GFX_FLAGS="-I/opt/homebrew/include -I/usr/local/include"
+		;;
 		install)
 			ANDROID_INSTALL="yes"
 		;;
@@ -126,7 +141,9 @@ done
 cd src || exit
 
 if [[ $BUILD != "android" ]]; then
-	if [[ $OPENGL_DEFINE == "-DOPENGL1X" ]]; then
+	if [[ $OPENGL_DEFINE == "-DVULKAN" ]]; then
+		echo "Building Vulkan"
+	elif [[ $OPENGL_DEFINE == "-DOPENGL1X" ]]; then
 		echo "Building OpenGL 1"
 	elif [[ $OPENGL_DEFINE == "-DGLES2" ]]; then
 		if [[ $OS == "Darwin" ]]; then

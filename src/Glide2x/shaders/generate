@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# SPDX-License-Identifier: MIT
+#
+# Compiles the Vulkan GLSL shaders to SPIR-V and emits them as C headers.
+#
+# The generated headers are committed to the repository on purpose: building
+# the game must not require a shader compiler. Only run this after editing a
+# .vert/.frag, and commit the regenerated headers alongside the source change.
+
+set -e
+
+cd "$(dirname "$0")"
+
+if ! command -v glslangValidator >/dev/null 2>&1; then
+	echo "glslangValidator not found." >&2
+	echo "Install it (Debian: glslang-tools, Arch: glslang, macOS: brew install glslang)" >&2
+	echo "or just use the committed headers -- they are only stale if you edited a shader." >&2
+	exit 1
+fi
+
+for shader in game.vert game.frag display.vert display.frag; do
+	# e.g. game.vert -> g_gameVertSpv
+	base=${shader%.*}
+	stage=${shader##*.}
+	symbol="g_${base}$(echo "${stage:0:1}" | tr '[:lower:]' '[:upper:]')${stage:1}Spv"
+	out="${base}_${stage}.spv.h"
+
+	echo -n "Compiling $shader -> $out... "
+
+	# -V targets Vulkan SPIR-V, --quiet keeps the output to actual problems.
+	glslangValidator -V "$shader" -o "$shader.tmp.spv"
+
+	{
+		echo "// SPDX-License-Identifier: MIT"
+		echo "// Generated from $shader by src/Glide2x/shaders/generate -- do not edit."
+		echo
+		echo "static const uint32_t $symbol[] = {"
+		# SPIR-V is a stream of 32-bit words; emit it as such so the array is
+		# already correctly aligned for vkCreateShaderModule's pCode.
+		od -An -tx4 -v "$shader.tmp.spv" | awk '{ for (i = 1; i <= NF; ++i) printf "\t0x%s,\n", $i }'
+		echo "};"
+	} > "$out"
+
+	rm -f "$shader.tmp.spv"
+	echo "OK!"
+done
+
+echo "Done. Remember to commit the regenerated headers."

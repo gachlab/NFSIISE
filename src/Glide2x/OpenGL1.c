@@ -37,6 +37,38 @@ extern BOOL keepAspectRatio, windowResized, linearFiltering;
 extern int32_t vSync, winWidth, winHeight;
 extern SDL_Window *sdlWin;
 
+static inline void backendGetDrawableSize(SDL_Window *win, int *w, int *h)
+{
+	SDL_GL_GetDrawableSize(win, w, h);
+}
+static inline BOOL clearUnusedArea(int32_t xOffset, int32_t yOffset, int32_t visibleWidth, int32_t visibleHeight)
+{
+	if (keepAspectRatio && (xOffset > 0 || yOffset > 0))
+	{
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		if (xOffset > 0)
+		{
+			glScissor(0, 0, xOffset, winHeight);
+			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+
+			glScissor(xOffset + visibleWidth, 0, winWidth - visibleWidth - xOffset, winHeight);
+			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+		}
+		if (yOffset > 0)
+		{
+			// Y starts from bottom
+
+			glScissor(0, 0, winWidth, winHeight - visibleHeight - yOffset);
+			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+
+			glScissor(0, yOffset + visibleHeight, winWidth, yOffset + 1);
+			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+		}
+		return true;
+	}
+	return false;
+}
+
 static void setTextureFiltering()
 {
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -136,6 +168,8 @@ REALIGN STDCALL void grChromakeyValue(GrColor_t value)
 }
 REALIGN STDCALL void grBufferSwap(int swap_interval)
 {
+	countFrame();
+
 // 	printf("grBufferSwap: [%d]\n", trianglesCount);
 
 	if (windowResized)
