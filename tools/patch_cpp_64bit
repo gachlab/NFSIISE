@@ -65,7 +65,33 @@ extern "C" void lowMemFree(void *ptr);
  * nothing there.
  */
 typedef uint32_t GameAddr32;
-#define NFS_GA(p) ((GameAddr32)(uintptr_t)(p))''',
+#define NFS_GA(p) ((GameAddr32)(uintptr_t)(p))
+
+/*
+ * A function, as the game stores one. Code cannot be addressed by an offset
+ * into the arena, so referenced functions get an index into a generated
+ * dispatch table instead, tagged in the top nibble so that a call site can
+ * tell it apart from a data offset. See tools/patch_cpp_64bit.
+ */
+#define NFS_FN_TAG  0xF0000000u
+#define NFS_FN(idx) ((GameAddr32)(NFS_FN_TAG | (idx)))
+extern void (*const g_nfsFuncTable[])(void *);
+extern const uint32_t g_nfsFuncCount;
+/* Defined far below, but call() needs it up here. */
+extern "C" void nfsCallGameFunction(uint32_t id, void *gameContext);
+extern "C" uint32_t nfsRegisterFunction(void (*fn)(void *));
+
+#include <cstdio>
+static inline void nfsBadCall(uint32_t target)
+{
+	/*
+	 * Fail loudly. Before the table existed this would have jumped to whatever
+	 * the value happened to address, which is how a mistake here used to
+	 * present as corruption three subsystems away.
+	 */
+	fprintf(stderr, "NFS: indirect call through %#x, which is not a function index\\n", target);
+	abort();
+}''',
     ),
     (
         "push32 size assertion",
@@ -106,6 +132,161 @@ typedef uint32_t GameAddr32;
         "\tGame *new_game_ctx = (Game *)lowMemAlloc(sizeof(Game));",
     ),
     (
+        "indirect call dispatch",
+        '''	template<typename T>
+	FnInl(void) call(const T addr)
+	{
+		esp -= 4;
+		((void(*)(void *))addr)(this);
+		esp += 4;
+	}''',
+        '''	template<typename T>
+	FnInl(void) call(const T addr)
+	{
+		/*
+		 * The game calls through values it keeps in 32-bit slots. Those are
+		 * no longer addresses -- code lives outside the arena -- so they are
+		 * tagged indices into a generated table. An untagged value here means
+		 * the game is trying to call data, which is a bug worth failing on
+		 * rather than jumping into whatever it points at.
+		 */
+		const uint32_t target = (uint32_t)(uintptr_t)addr;
+		esp -= 4;
+		if ((target & NFS_FN_TAG) == NFS_FN_TAG)
+			nfsCallGameFunction(target, this);
+		else
+			nfsBadCall(target);
+		esp += 4;
+	}''',
+    ),
+    (
+        "wrapper call-in helpers",
+        r'''extern "C" void wrap_regparm2(Game &game, void (*func)(Game &), int32_t arg0, int32_t arg1)
+{
+	game.eax = arg0;
+	game.edx = arg1;
+	func(game);
+}
+
+extern "C" int32_t wrap_stdcall2_ret(Game &game, void (*func)(Game &), int32_t arg0, int32_t arg1)
+{
+	game.push32(arg1);
+	game.push32(arg0);
+	game.esp -= 4;
+	func(game);
+	game.esp += 4;
+	return game.eax;
+}
+extern "C" void wrap_stdcall4(Game &game, void (*func)(Game &), int32_t arg0, int32_t arg1, int32_t arg2, int32_t arg3)
+{
+	game.push32(arg3);
+	game.push32(arg2);
+	game.push32(arg1);
+	game.push32(arg0);
+	game.esp -= 4;
+	func(game);
+	game.esp += 4;
+}''',
+        r'''/*
+ * Calling back into the game from the wrapper.
+ *
+ * The wrapper holds game functions as table indices rather than addresses --
+ * see build_function_table -- so everything it calls in through resolves the
+ * index here. nfsCallGameFunction is for the wrapper's own stored pointers
+ * (thread start routines, the window proc, the audio callbacks); the wrap_*
+ * helpers below are the ones the translated game's own thunks go through.
+ */
+/*
+ * The wrapper's own thunks -- the COM vtable entries in DInput.c -- are not
+ * visible to the generator, so they register at run time and take indices that
+ * continue on from the generated table's.
+ */
+#define NFS_MAX_REGISTERED 64
+static void (*g_nfsRegistered[NFS_MAX_REGISTERED])(void *);
+static uint32_t g_nfsRegisteredCount;
+
+extern "C" uint32_t nfsRegisterFunction(void (*fn)(void *))
+{
+	uint32_t i;
+	if (!fn)
+		return 0;
+	/* Stable across repeated registration, so a vtable rebuilt after a device
+	 * is recreated keeps the same indices. */
+	for (i = 0; i < g_nfsRegisteredCount; ++i)
+		if (g_nfsRegistered[i] == fn)
+			return NFS_FN_TAG | (g_nfsFuncCount + i);
+	if (g_nfsRegisteredCount >= NFS_MAX_REGISTERED)
+	{
+		fprintf(stderr, "NFS: too many registered wrapper functions\\n");
+		abort();
+	}
+	g_nfsRegistered[g_nfsRegisteredCount] = fn;
+	return NFS_FN_TAG | (g_nfsFuncCount + g_nfsRegisteredCount++);
+}
+
+static void (*nfsLookup(uint32_t index))(void *)
+{
+	if (index < g_nfsFuncCount)
+		return g_nfsFuncTable[index];
+	if (index - g_nfsFuncCount < g_nfsRegisteredCount)
+		return g_nfsRegistered[index - g_nfsFuncCount];
+	return 0;
+}
+
+extern "C" void nfsCallGameFunction(uint32_t id, void *gameContext)
+{
+	if ((id & NFS_FN_TAG) == NFS_FN_TAG)
+	{
+		void (*fn)(void *) = nfsLookup(id & ~NFS_FN_TAG);
+		if (fn)
+		{
+			fn(gameContext);
+			return;
+		}
+	}
+	nfsBadCall(id);
+}
+
+static void (*nfsResolve(uint32_t id))(void *)
+{
+	if ((id & NFS_FN_TAG) == NFS_FN_TAG)
+	{
+		void (*fn)(void *) = nfsLookup(id & ~NFS_FN_TAG);
+		if (fn)
+			return fn;
+	}
+	nfsBadCall(id);
+	return 0;
+}
+
+extern "C" void wrap_regparm2(Game &game, uint32_t func, int32_t arg0, int32_t arg1)
+{
+	game.eax = arg0;
+	game.edx = arg1;
+	nfsResolve(func)(&game);
+}
+
+extern "C" int32_t wrap_stdcall2_ret(Game &game, uint32_t func, int32_t arg0, int32_t arg1)
+{
+	game.push32(arg1);
+	game.push32(arg0);
+	game.esp -= 4;
+	nfsResolve(func)(&game);
+	game.esp += 4;
+	return game.eax;
+}
+extern "C" void wrap_stdcall4(Game &game, uint32_t func, int32_t arg0, int32_t arg1, int32_t arg2, int32_t arg3)
+{
+	game.push32(arg3);
+	game.push32(arg2);
+	game.push32(arg1);
+	game.push32(arg0);
+	game.esp -= 4;
+	nfsResolve(func)(&game);
+	game.esp += 4;
+}''',
+    ),
+    (
         "entry point Game contexts",
         '''extern "C" void nfs2seEntrypoint()
 {
@@ -136,6 +317,67 @@ typedef uint32_t GameAddr32;
 }''',
     ),
 ]
+
+
+def build_function_table(source):
+    """Replace code addresses with indices into a generated dispatch table.
+
+    The game stores function addresses in 32-bit slots -- 295 sites take one
+    directly, and 195 more sit in the static tables alongside data addresses.
+    Under base+offset there is no address that can represent code, because the
+    executable is not in the arena, so each referenced function gets an index
+    instead and `call` dispatches through a table.
+
+    The indices are tagged in their top nibble so a call site can tell a
+    function from a data offset, and so that mistaking one for the other traps
+    instead of jumping somewhere arbitrary.
+
+    Ordering works out: the generated `static Fn(void) sub_X(Game *)`
+    trampolines all sit in one block, before both the _data initialiser and
+    every use, so the table can go straight after them.
+
+    Returns (source, count).
+    """
+    # Three reference forms, and two name prefixes -- the generated code has
+    # `nullsub_N` stubs alongside `sub_XXXX`. The leading \b keeps `sub_` from
+    # matching inside `nullsub_`.
+    FUNC = r'\b((?:null)?sub_[0-9A-Fa-f]+)\b'
+    referenced = set()
+    referenced.update(re.findall(r'\(int32_t\)' + FUNC, source))
+    referenced.update(re.findall(r'NFS_GA\(' + FUNC + r'\)', source))
+    referenced.update(re.findall(r'push32\(' + FUNC + r'\)', source))
+    if not referenced:
+        return source, 0
+
+    ordered = sorted(referenced)
+    index_of = {name: i for i, name in enumerate(ordered)}
+
+    entries = "".join(f"\t(void (*)(void *))&{name},\n" for name in ordered)
+    table = (
+        "\n/* Generated by tools/patch_cpp_64bit -- see build_function_table. */\n"
+        "void (*const g_nfsFuncTable[])(void *) = {\n"
+        f"{entries}"
+        "};\n"
+        f"const uint32_t g_nfsFuncCount = {len(ordered)};\n"
+    )
+
+    # Straight after the last trampoline definition, whichever prefix it uses.
+    last = None
+    for m in re.finditer(r'^static Fn\(void\) (?:null)?sub_[0-9A-Fa-f]+\(Game \*self\).*$', source, re.M):
+        last = m
+    if last is None:
+        raise RuntimeError("no trampoline definitions found")
+    source = source[:last.end()] + "\n" + table + source[last.end():]
+
+    # Rewrite both reference forms to the tagged index.
+    def by_index(m):
+        return f'NFS_FN({index_of[m.group(1)]})'
+    source = re.sub(r'\(int32_t\)' + FUNC, by_index, source)
+    source = re.sub(r'NFS_GA\(' + FUNC + r'\)', by_index, source)
+    source = re.sub(r'push32\(' + FUNC + r'\)',
+                    lambda m: f'push32(NFS_FN({index_of[m.group(1)]}))', source)
+
+    return source, len(ordered)
 
 
 # A generated field declaration inside the _data / _bss structs, e.g.
@@ -221,6 +463,15 @@ def main():
         applied.append("static pointer tables")
     else:
         print("  already patched: static pointer tables")
+
+    # Must run after the tables are narrowed: it rewrites NFS_GA(sub_X), which
+    # only exists once those initialisers have been converted.
+    source, functions = build_function_table(source)
+    if functions:
+        print(f"  patched:         function dispatch table ({functions} functions)")
+        applied.append("function dispatch table")
+    else:
+        print("  already patched: function dispatch table")
 
     if check_only:
         print("\nUp to date." if not applied else "\nWould apply the changes above.")

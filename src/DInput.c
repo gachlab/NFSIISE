@@ -35,9 +35,16 @@
 
 	#define WRAP_NAME(name) name##_wrap
 	#define MAYBE_STATIC
+	/*
+	 * A COM slot holds a function index, and these thunks are the wrapper's
+	 * own, so the generator never saw them -- they register at run time.
+	 */
+	uint32_t nfsRegisterFunction(void (*fn)(void *));
+	#define GAME_FN(name) nfsRegisterFunction((void (*)(void *))WRAP_NAME(name))
 #else
 	#define WRAP_NAME(name) name
 	#define MAYBE_STATIC static
+	#define GAME_FN(name) GAME_FN(name)
 #endif
 
 #include <SDL2/SDL_events.h>
@@ -863,11 +870,11 @@ MAYBE_STATIC REALIGN STDCALL uint32_t CreateEffect(GameAddr thisAddr, GameAddr r
 	dinput_eff->gain = &(*this)->gain;
 	dinput_eff->effect_idx = -1;
 
-	dinput_eff->SetParameters = GAME_ADDR(WRAP_NAME(SetParameters));
-	dinput_eff->Start = GAME_ADDR(WRAP_NAME(Start));
-	dinput_eff->Stop = GAME_ADDR(WRAP_NAME(Stop));
-	dinput_eff->Download = GAME_ADDR(WRAP_NAME(Download));
-	dinput_eff->Unload = GAME_ADDR(WRAP_NAME(Unload));
+	dinput_eff->SetParameters = GAME_FN(SetParameters);
+	dinput_eff->Start = GAME_FN(Start);
+	dinput_eff->Stop = GAME_FN(Stop);
+	dinput_eff->Download = GAME_FN(Download);
+	dinput_eff->Unload = GAME_FN(Unload);
 
 	memcpy(&dinput_eff->guid, rguid, sizeof(GUID));
 
@@ -959,22 +966,22 @@ MAYBE_STATIC REALIGN STDCALL uint32_t CreateDevice(GameAddr thisAddr, GameAddr r
 	((DirectInputObject *)dinputDev)->is_device = true;
 	dinputDev = (void *)dinputDev + sizeof(DirectInputObject);
 
-	dinputDev->QueryInterface = GAME_ADDR(WRAP_NAME(QueryInterface));
-	dinputDev->Release = GAME_ADDR(WRAP_NAME(Release));
+	dinputDev->QueryInterface = GAME_FN(QueryInterface);
+	dinputDev->Release = GAME_FN(Release);
 
-	dinputDev->GetCapabilities = GAME_ADDR(WRAP_NAME(GetCapabilities));
-	dinputDev->SetProperty = GAME_ADDR(WRAP_NAME(SetProperty));
-	dinputDev->Acquire = GAME_ADDR(WRAP_NAME(Acquire));
-	dinputDev->Unacquire = GAME_ADDR(WRAP_NAME(Unacquire));
-	dinputDev->GetDeviceState = GAME_ADDR(WRAP_NAME(GetDeviceState));
-	dinputDev->GetDeviceData = GAME_ADDR(WRAP_NAME(GetDeviceData));
-	dinputDev->SetDataFormat = GAME_ADDR(WRAP_NAME(SetDataFormat));
-	dinputDev->SetEventNotification = GAME_ADDR(WRAP_NAME(SetEventNotification));
-	dinputDev->SetCooperativeLevel = GAME_ADDR(WRAP_NAME(SetCooperativeLevel));
-	dinputDev->GetObjectInfo = GAME_ADDR(WRAP_NAME(GetObjectInfo));
-	dinputDev->CreateEffect = GAME_ADDR(WRAP_NAME(CreateEffect));
-	dinputDev->SendForceFeedbackCommand = GAME_ADDR(WRAP_NAME(SendForceFeedbackCommand));
-	dinputDev->Poll = GAME_ADDR(WRAP_NAME(Poll));
+	dinputDev->GetCapabilities = GAME_FN(GetCapabilities);
+	dinputDev->SetProperty = GAME_FN(SetProperty);
+	dinputDev->Acquire = GAME_FN(Acquire);
+	dinputDev->Unacquire = GAME_FN(Unacquire);
+	dinputDev->GetDeviceState = GAME_FN(GetDeviceState);
+	dinputDev->GetDeviceData = GAME_FN(GetDeviceData);
+	dinputDev->SetDataFormat = GAME_FN(SetDataFormat);
+	dinputDev->SetEventNotification = GAME_FN(SetEventNotification);
+	dinputDev->SetCooperativeLevel = GAME_FN(SetCooperativeLevel);
+	dinputDev->GetObjectInfo = GAME_FN(GetObjectInfo);
+	dinputDev->CreateEffect = GAME_FN(CreateEffect);
+	dinputDev->SendForceFeedbackCommand = GAME_FN(SendForceFeedbackCommand);
+	dinputDev->Poll = GAME_FN(Poll);
 
 	memcpy(&dinputDev->guid, rguid, sizeof(GUID));
 
@@ -1039,9 +1046,9 @@ REALIGN STDCALL uint32_t DirectInputCreateA_wrap(MAYBE_THIS GameAddr hInstance, 
 	((DirectInputObject *)dinput)->ref = 1;
 	dinput = (void *)dinput + sizeof(DirectInputObject);
 
-	dinput->Release = GAME_ADDR(WRAP_NAME(Release));
-	dinput->CreateDevice = GAME_ADDR(WRAP_NAME(CreateDevice));
-	dinput->EnumDevices = GAME_ADDR(WRAP_NAME(EnumDevices));
+	dinput->Release = GAME_FN(Release);
+	dinput->CreateDevice = GAME_FN(CreateDevice);
+	dinput->EnumDevices = GAME_FN(EnumDevices);
 
 	{
 		DirectInput **iface = (DirectInput **)lowMemAlloc(sizeof(void *));

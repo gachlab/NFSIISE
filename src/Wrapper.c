@@ -15,10 +15,10 @@
 
 static const char title[] = "Need For Speed II SE";
 
-typedef void (*ProcedureType)(MAYBE_THIS_SINGLE);
-static ProcedureType atExitProcedures[10];
+/* Game function indices, not addresses. */
+static GameAddr atExitProcedures[10];
 static uint32_t atExitProcedureCount;
-REALIGN STDCALL void WrapperAtExit(ProcedureType proc)
+REALIGN STDCALL void WrapperAtExit(GameAddr proc)
 {
 	if (atExitProcedureCount < 10)
 		atExitProcedures[atExitProcedureCount++] = proc;
@@ -66,7 +66,7 @@ void exit_func(void)
 		timerID = SDL_AddTimer(2500, watchdogTimer, NULL);
 #ifdef NFS_CPP
 		extern void *main_game_thread;
-		atExitProcedures[i](main_game_thread);
+		nfsCallGameFunction(atExitProcedures[i], main_game_thread);
 #else
 		atExitProcedures[i]();
 #endif
@@ -582,9 +582,9 @@ REALIGN STDCALL void WrapperStartInThread(SDL_ThreadFunction mainCodeInSeparateT
 }
 #endif
 
-extern WindowProc wndProc;
+extern GameAddr wndProc;
 
-REALIGN STDCALL SDL_Window *WrapperCreateWindow(WindowProc windowProc)
+REALIGN STDCALL SDL_Window *WrapperCreateWindow(GameAddr windowProc)
 {
 #ifndef __ANDROID__
 	static const uint32_t palette[8] = {0xFF000000, 0xFF000080, 0xFF0000FF, 0xFFC0C0C0, 0xFF00FFFF, 0xFFFFFFFF, 0x00000000, 0xFF008080};

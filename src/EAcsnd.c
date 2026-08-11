@@ -5,7 +5,7 @@
 
 extern BOOL linearSoundInterpolation;
 
-static void (REGPARM *getSamples)(void *samples, uint32_t num_samples_per_chn);
+static GameAddr getSamples;   /* game function index, see Wrapper.h */
 
 #ifdef NFS_CPP
 	void wrap_regparm2(void *this, void *func, int32_t arg0, int32_t arg1);
@@ -26,7 +26,7 @@ static void (REGPARM *getSamples)(void *samples, uint32_t num_samples_per_chn);
 #endif
 
 typedef void (*FadeInOut)(MAYBE_THIS_SINGLE);
-static FadeInOut fadeInOut;
+static GameAddr fadeInOut;   /* game function index */
 
 #include <SDL2/SDL_audio.h>
 
@@ -112,7 +112,7 @@ REALIGN uint32_t iSNDdllversion_(void)
 	return 0x60002;
 }
 
-REALIGN STDCALL uint32_t iSNDdirectsetfunctions_wrap(void (REGPARM *arg1)(), void (*arg2)(), void (*arg3)(), FadeInOut arg4, void (*arg5)())
+REALIGN STDCALL uint32_t iSNDdirectsetfunctions_wrap(GameAddr arg1, GameAddr arg2, GameAddr arg3, GameAddr arg4, GameAddr arg5)
 {
 	getSamples = arg1;
 	fadeInOut  = arg4;
@@ -166,7 +166,7 @@ REALIGN void iSNDdirectserve_(MAYBE_THIS_SINGLE)
 			unPaused = true;
 		}
 #ifdef NFS_CPP
-		fadeInOut(this);
+		nfsCallGameFunction(fadeInOut, this);
 #else
 		fadeInOut();
 #endif

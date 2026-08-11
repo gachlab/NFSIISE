@@ -86,6 +86,15 @@ typedef struct
 	FILE *file;
 } GameFile;
 
+/*
+ * Calls a game function the wrapper is holding. Under the dispatch-table model
+ * those are indices, not addresses, so they cannot simply be called -- see
+ * tools/patch_cpp_64bit. Defined by the translated game.
+ */
+#ifdef NFS_CPP
+void nfsCallGameFunction(uint32_t id, void *gameContext);
+#endif
+
 FILE *gameFileResolve(GameAddr handle);
 GameAddr gameFileWrap(FILE *file);
 

@@ -228,7 +228,7 @@ static int threadFunction(void *data)
 	SDL_SemWait(thread->sem);
 	SDL_DestroySemaphore(thread->sem);
 #ifdef NFS_CPP
-	thread->function(thread->arg);
+	nfsCallGameFunction(thread->function, thread->arg);
 #else
 	thread->threadParameter(); //In this game thread parameter is a function address
 #endif
@@ -244,7 +244,7 @@ REALIGN STDCALL GameAddr CreateThread_wrap(GameAddr threadAttributes, uint32_t s
 	Thread *thread = (Thread *)lowMemAlloc(sizeof(Thread));
 	thread->handleType = HandleThread;
 #ifdef NFS_CPP
-	thread->function = startAddress;
+	thread->function = (GameAddr)startAddress;
 	thread->arg = parameter;
 #else
 	thread->threadParameter = parameter;

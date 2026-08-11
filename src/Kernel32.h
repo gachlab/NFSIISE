@@ -126,7 +126,7 @@
 	{
 		HandleType handleType;
 #ifdef NFS_CPP
-		int (*function)(void *);
+		GameAddr function;   /* a game function index, see Wrapper.h */
 		void *arg;
 #else
 		int (*threadParameter)();

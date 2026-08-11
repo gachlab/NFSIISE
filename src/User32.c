@@ -29,7 +29,7 @@ extern float dpr;
 BOOL needRecreateGl = false;
 BOOL windowResized = false;
 
-WindowProc wndProc;
+GameAddr wndProc;   /* game function index */
 
 SDL_TouchID touchId = 0;
 float touchDX = 0.0f, touchDY = 0.0f;
