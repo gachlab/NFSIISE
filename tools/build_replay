@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+#
+# SPDX-License-Identifier: MIT
+#
+# Builds tools/glide_replay against one of the Glide2x backends.
+#
+#   ./tools/build_replay vulkan    (default)
+#   ./tools/build_replay gl2
+#   ./tools/build_replay metal
+#
+# This builds NATIVELY (64-bit is fine) -- the harness exists precisely so the
+# backends can be exercised on hosts where the 32-bit game cannot run.
+
+set -e
+
+cd "$(dirname "$0")/.."
+
+BACKEND=${1:-vulkan}
+OUT="tools/glide_replay"
+OS=$(uname)
+
+CFLAGS="-std=gnu89 -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -g -O1"
+LIBS="$(pkg-config --libs sdl2) -lm"
+CFLAGS="$CFLAGS $(pkg-config --cflags sdl2)"
+
+case "$BACKEND" in
+	vulkan)
+		DEFINE="-DVULKAN"
+		if [ "$OS" == "Darwin" ]; then
+			# Homebrew's vulkan-loader dispatches to MoltenVK.
+			CFLAGS="$CFLAGS -I/opt/homebrew/include -I/usr/local/include"
+			LIBS="$LIBS -L/opt/homebrew/lib -L/usr/local/lib -lvulkan"
+		else
+			LIBS="$LIBS -lvulkan"
+		fi
+		;;
+	metal)
+		DEFINE="-DMETAL"
+		if [ "$OS" != "Darwin" ]; then
+			echo "The Metal backend only builds on macOS." >&2
+			exit 1
+		fi
+		LIBS="$LIBS -framework Metal -framework QuartzCore -framework Foundation"
+		;;
+	gl1)
+		DEFINE="-DOPENGL1X"
+		if [ "$OS" == "Darwin" ]; then
+			LIBS="$LIBS -framework OpenGL"
+		else
+			LIBS="$LIBS -lGL"
+		fi
+		;;
+	gl2)
+		DEFINE=""
+		if [ "$OS" == "Darwin" ]; then
+			LIBS="$LIBS -framework OpenGL"
+		else
+			LIBS="$LIBS -lGL"
+		fi
+		;;
+	*)
+		echo "Unknown backend: $BACKEND (expected vulkan, metal, gl1 or gl2)" >&2
+		exit 1
+		;;
+esac
+
+OUT="${OUT}_${BACKEND}"
+
+echo -n "Building $OUT... "
+# shellcheck disable=SC2086
+clang $CFLAGS $DEFINE -o "$OUT" tools/glide_replay.c src/Glide2x.c $LIBS
+echo "OK!"
+
+if [ "$BACKEND" == "vulkan" ]; then
+	echo
+	echo "Run it under the validation layers with:"
+	if [ "$OS" == "Darwin" ]; then
+		echo "  VK_LAYER_PATH=/opt/homebrew/share/vulkan/explicit_layer.d \\"
+		echo "  VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation $OUT"
+	else
+		echo "  VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation $OUT"
+	fi
+fi

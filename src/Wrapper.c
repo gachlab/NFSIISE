@@ -270,13 +270,17 @@ static void initializeSDL2()
 #else
 	extern const char binaryGameVersion;
 #endif
-	printf("%s\n  Wrapper v%s\n  Game    v%s\n  OpenGL  ", title, WRAPPER_VERSION, &binaryGameVersion);
-#if defined(OPENGL1X)
-	puts("1");
+	printf("%s\n  Wrapper v%s\n  Game    v%s\n  Backend ", title, WRAPPER_VERSION, &binaryGameVersion);
+#if defined(VULKAN)
+	puts("Vulkan");
+#elif defined(METAL)
+	puts("Metal");
+#elif defined(OPENGL1X)
+	puts("OpenGL 1");
 #elif defined(GLES2)
-	puts("ES 2");
+	puts("OpenGL|ES 2");
 #else
-	puts("2");
+	puts("OpenGL 2");
 #endif
 	fflush(stdout);
 
@@ -524,7 +528,9 @@ void WrapperInit(void)
 		fclose(f);
 	}
 
-#ifndef OPENGL1X
+#if defined(VULKAN) || defined(METAL)
+	/* No GL context attributes to negotiate: the backend owns device creation. */
+#elif !defined(OPENGL1X)
 # ifdef GLES2
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
 # endif
@@ -620,7 +626,14 @@ REALIGN STDCALL SDL_Window *WrapperCreateWindow(WindowProc windowProc)
 
 	checkGameDirs();
 
-	int windowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI | (startInFullScreen ? fullScreenFlag : 0);
+#if defined(VULKAN)
+	const int backendWindowFlag = SDL_WINDOW_VULKAN;
+#elif defined(METAL)
+	const int backendWindowFlag = SDL_WINDOW_METAL;
+#else
+	const int backendWindowFlag = SDL_WINDOW_OPENGL;
+#endif
+	int windowFlags = backendWindowFlag | SDL_WINDOW_ALLOW_HIGHDPI | (startInFullScreen ? fullScreenFlag : 0);
 	if (fullScreenFlag == SDL_WINDOW_FULLSCREEN_DESKTOP)
 		windowFlags |= SDL_WINDOW_RESIZABLE;
 	sdlWin = SDL_CreateWindow(title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, initialWinWidth, initialWinHeight, windowFlags);

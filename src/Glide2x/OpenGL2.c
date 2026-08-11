@@ -251,6 +251,38 @@ extern BOOL keepAspectRatio, needRecreateGl, windowResized, linearFiltering, fix
 extern int32_t vSync, winWidth, winHeight, initialWinWidth, initialWinHeight;
 extern SDL_Window *sdlWin;
 
+static inline void backendGetDrawableSize(SDL_Window *win, int *w, int *h)
+{
+	SDL_GL_GetDrawableSize(win, w, h);
+}
+static inline BOOL clearUnusedArea(int32_t xOffset, int32_t yOffset, int32_t visibleWidth, int32_t visibleHeight)
+{
+	if (keepAspectRatio && (xOffset > 0 || yOffset > 0))
+	{
+		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+		if (xOffset > 0)
+		{
+			glScissor(0, 0, xOffset, winHeight);
+			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+
+			glScissor(xOffset + visibleWidth, 0, winWidth - visibleWidth - xOffset, winHeight);
+			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+		}
+		if (yOffset > 0)
+		{
+			// Y starts from bottom
+
+			glScissor(0, 0, winWidth, winHeight - visibleHeight - yOffset);
+			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+
+			glScissor(0, yOffset + visibleHeight, winWidth, yOffset + 1);
+			glClear(GL_DEPTH_BUFFER_BIT | GL_COLOR_BUFFER_BIT);
+		}
+		return true;
+	}
+	return false;
+}
+
 /* GLSL game */
 static GLuint g_vShader, g_fShader, g_shaderProgram;
 static GLint g_aPositionLoc, g_aTexCoordLoc, g_aColorLoc, g_aFogLoc, g_uMatrixLoc, g_uTextureEnabledLoc, g_uFogEnabledLoc, g_uFogColorLoc;
@@ -813,6 +845,8 @@ REALIGN STDCALL void grChromakeyValue(GrColor_t value)
 }
 REALIGN STDCALL void grBufferSwap(int swap_interval)
 {
+	countFrame();
+
 // 	fprintf(stderr, "grBufferSwap: [%d]\n", g_trianglesCount);
 
 	drawTriangles();

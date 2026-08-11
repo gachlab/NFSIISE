@@ -12,11 +12,48 @@ Don't forget to update submodules:
 git submodule update --init --recursive
 ```
 
-## OpenGL
+## Graphics backends
 
 * By default OpenGL 2 is used (except Android - it always uses GLES2).
 * To use OpenGL 1, add `gl1` argument to compilation script.
 * To use OpenGL|ES 2, add `gles2` argument to compilation script.
+* To use Vulkan, add `vulkan` argument to compilation script. Requires a Vulkan
+  1.1 driver and the Vulkan loader development package (`libvulkan-dev:i386` on
+  Debian). Nothing else - the SPIR-V shaders are committed pre-compiled, so a
+  shader compiler is **not** needed to build.
+
+Backends are selected at compile time by `src/Glide2x.c`, which includes exactly
+one of `src/Glide2x/{OpenGL1,OpenGL2,Vulkan}.c`. Each backend is self-contained:
+there are no `if (backend)` branches in shared code.
+
+### Vulkan notes
+
+* Shader sources live in `src/Glide2x/shaders`. After editing one, regenerate the
+  committed headers with `src/Glide2x/shaders/generate` (needs `glslangValidator`)
+  and commit them alongside the change.
+* `wideLines` is used for Glide's line drawing when the driver supports it. Where
+  it does not (notably MoltenVK), lines fall back to 1 pixel wide.
+
+## Testing the backends without the game
+
+The game is 32-bit only, but the graphics backends are not. `tools/glide_replay`
+links a backend against stubs for the globals `Wrapper.c` owns and replays a
+synthetic Glide trace covering every feature the game uses, so a backend can be
+built and exercised natively on any host - including 64-bit ARM, where the game
+itself cannot run at all.
+
+```sh
+./tools/build_replay vulkan     # or gl1, gl2
+./tools/glide_replay_vulkan
+```
+
+Run it under the Vulkan validation layers to check synchronisation, image layouts
+and descriptor usage:
+
+```sh
+VK_LOADER_LAYERS_ENABLE=VK_LAYER_KHRONOS_validation \
+VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true ./tools/glide_replay_vulkan
+```
 
 ## Compile for x86:
 
