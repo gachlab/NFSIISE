@@ -77,4 +77,16 @@ typedef uint32_t (STDCALL *WindowProc)(MAYBE_THIS void *hWnd, uint32_t uMsg, uin
 
 char *convertFilePath(const char *srcPth, BOOL convToLower);
 
+/*
+ * A libc FILE as the game holds it: a low-memory cell containing the real
+ * pointer, referred to by GameAddr. See fopen_wrap / fclose_wrap.
+ */
+typedef struct
+{
+	FILE *file;
+} GameFile;
+
+FILE *gameFileResolve(GameAddr handle);
+GameAddr gameFileWrap(FILE *file);
+
 #endif // WRAPPER_H

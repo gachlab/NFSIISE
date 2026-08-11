@@ -118,11 +118,11 @@ REALIGN STDCALL uint32_t iSNDdirectsetfunctions_wrap(void (REGPARM *arg1)(), voi
 	fadeInOut  = arg4;
 	return 0;
 }
-REALIGN REGPARM uint32_t iSNDdirectcaps_(void *hWnd)
+REALIGN REGPARM uint32_t iSNDdirectcaps_(GameAddr hWnd)
 {
 	return 0x23E0F; //?
 }
-REALIGN REGPARM uint32_t iSNDdirectstart_(uint32_t arg1, void *hWnd)
+REALIGN REGPARM uint32_t iSNDdirectstart_(uint32_t arg1, GameAddr hWnd)
 {
 	if (canGetSamples)
 		return 0;

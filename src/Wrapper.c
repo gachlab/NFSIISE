@@ -717,41 +717,78 @@ REALIGN void SDL_Delay_wrap(uint32_t ms)
  * same thing on a 32-bit build and very much not on a 64-bit one, so the
  * argument is taken as an opaque block and decoded in GameVarargs.c.
  */
-REALIGN int32_t vsprintf_wrap(char *s, const char *fmt, void *arg)
+REALIGN int32_t vsprintf_wrap(GameAddr sAddr, GameAddr fmtAddr, GameAddr argAddr)
 {
-	return gameVsprintf(s, fmt, arg);
+	return gameVsprintf((char *)GAME_PTR(sAddr), (const char *)GAME_PTR(fmtAddr), GAME_PTR(argAddr));
 }
-REALIGN int32_t fscanf_wrap(FILE *f, const char *fmt, ...)
+
+/*
+ * The game opens files and keeps the result in a 32-bit register, but a libc
+ * FILE lives on libc's own heap, far above 2 GiB. Hand back a low-memory cell
+ * holding the real pointer instead, and unwrap it on the way back in.
+ */
+FILE *gameFileResolve(GameAddr handle)
 {
-	int ret;
-	va_list arg;
-	va_start(arg, fmt);
-	ret = vfscanf(f, fmt, arg);
-	va_end(arg);
+	GameFile *gameFile = (GameFile *)GAME_PTR(handle);
+	return gameFile ? gameFile->file : NULL;
+}
+GameAddr gameFileWrap(FILE *file)
+{
+	GameFile *gameFile;
+	if (!file)
+		return 0;
+	gameFile = (GameFile *)lowMemAlloc(sizeof(GameFile));
+	if (!gameFile)
+	{
+		fclose(file);
+		return 0;
+	}
+	gameFile->file = file;
+	return GAME_ADDR(gameFile);
+}
+
+/*
+ * Every call site in the translated game passes exactly one output pointer,
+ * and it is a game address rather than a host one. Spelling that out beats
+ * another va_list bridge for a single argument -- if a call with a different
+ * shape ever turns up, this is where it will fail loudly.
+ */
+REALIGN int32_t fscanf_wrap(GameAddr fileHandle, GameAddr fmtAddr, GameAddr outAddr)
+{
+	FILE *f = gameFileResolve(fileHandle);
+	if (!f)
+		return -1;
+	return fscanf(f, (const char *)GAME_PTR(fmtAddr), GAME_PTR(outAddr));
+}
+REALIGN int32_t fclose_wrap(GameAddr fileHandle)
+{
+	GameFile *gameFile = (GameFile *)GAME_PTR(fileHandle);
+	int32_t ret;
+	if (!gameFile || !gameFile->file)
+		return -1;
+	ret = fclose(gameFile->file);
+	gameFile->file = NULL;
+	lowMemFree(gameFile);
 	return ret;
-}
-REALIGN int32_t fclose_wrap(FILE *f)
-{
-	return fclose(f);
 }
 /*
  * The game's entire heap flows through these three. On a 64-bit build they must
  * return addresses below 2 GiB, because the translated code stores whatever it
  * gets back in an int32_t. See LowMem.h.
  */
-REALIGN void *calloc_wrap(size_t num, size_t size)
+REALIGN GameAddr calloc_wrap(size_t num, size_t size)
 {
-	return lowMemCalloc(num, size);
+	return GAME_ADDR(lowMemCalloc(num, size));
 }
-REALIGN void *malloc_wrap(size_t num)
+REALIGN GameAddr malloc_wrap(size_t num)
 {
-	return lowMemAlloc(num);
+	return GAME_ADDR(lowMemAlloc(num));
 }
-REALIGN void free_wrap(void *ptr)
+REALIGN void free_wrap(GameAddr ptr)
 {
-	lowMemFree(ptr);
+	lowMemFree(GAME_PTR(ptr));
 }
-REALIGN time_t time_wrap(time_t *timer)
+REALIGN time_t time_wrap(GameAddr timerAddr)
 {
-	return time(timer);
+	return time((time_t *)GAME_PTR(timerAddr));
 }

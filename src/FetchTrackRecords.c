@@ -24,12 +24,25 @@ typedef struct
 	StfEntry laps[3][10];
 } Stf;
 
-REALIGN REGPARM FILE *fopen_wrap(const char *fileName, const char *p)
+/*
+ * The game holds the result in a 32-bit register, so it cannot be a libc FILE
+ * pointer -- those live far above 2 GiB on a 64-bit host. gameFileWrap parks
+ * the real pointer in low memory and returns a handle the game can keep.
+ *
+ * Note this file's own callers want the FILE directly, so they go through
+ * openFile() rather than round-tripping through a handle.
+ */
+static FILE *openFile(const char *fileName, const char *mode)
 {
 	char *tmpFileName = convertFilePath(fileName, true);
-	FILE *f = fopen(tmpFileName, p);
+	FILE *f = fopen(tmpFileName, mode);
 	free(tmpFileName);
 	return f;
+}
+REALIGN REGPARM GameAddr fopen_wrap(GameAddr fileNameAddr, GameAddr modeAddr)
+{
+	return gameFileWrap(openFile((const char *)GAME_PTR(fileNameAddr),
+	                             (const char *)GAME_PTR(modeAddr)));
 }
 
 static void readEntry(FILE *f, StfEntry *stfEntry)
@@ -54,7 +67,7 @@ REALIGN REGPARM void fetchTrackRecords(MAYBE_THIS uint32_t trackNo, BOOL clear)
 	{
 		//Get the track records relative file path, +20 means that we want a text file (ssf), not a binary file (stf)
 		sub_41B250(trackNo + 20, buffer);
-		if ((f = fopen_wrap(buffer, "r")))
+		if ((f = openFile(buffer, "r")))
 		{
 			//Skip unneeded data
 			fgets(buffer, 80, f);
@@ -76,7 +89,7 @@ REALIGN REGPARM void fetchTrackRecords(MAYBE_THIS uint32_t trackNo, BOOL clear)
 
 	//Get the track records relative file path, get a binary file (stf)
 	sub_41B250(trackNo, buffer);
-	if ((f = fopen_wrap(buffer, "wb")))
+	if ((f = openFile(buffer, "wb")))
 	{
 		fwrite(&stf, 1, sizeof stf, f);
 		fclose(f);

@@ -1032,8 +1032,9 @@ MAYBE_STATIC REALIGN STDCALL uint32_t EnumDevices(GameAddr thisAddr, uint32_t de
 
 /// Entrypoint
 
-REALIGN STDCALL uint32_t DirectInputCreateA_wrap(MAYBE_THIS void *hInstance, uint32_t version, DirectInput ***directInputA, void *unkOuter)
+REALIGN STDCALL uint32_t DirectInputCreateA_wrap(MAYBE_THIS GameAddr hInstance, uint32_t version, GameAddr directInputAAddr, GameAddr unkOuter)
 {
+	DirectInput ***directInputA = (DirectInput ***)GAME_PTR(directInputAAddr);
 	DirectInput *dinput = (DirectInput *)lowMemCalloc(1, sizeof(DirectInputObject) + sizeof(DirectInput));
 	((DirectInputObject *)dinput)->ref = 1;
 	dinput = (void *)dinput + sizeof(DirectInputObject);
