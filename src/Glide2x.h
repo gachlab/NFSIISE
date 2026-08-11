@@ -271,11 +271,12 @@ typedef int32_t GrOriginLocation_t;
 
 typedef struct {
     int                size;
-    void               *lfbPtr;
+    GameAddr           lfbPtr;
     uint32_t              strideInBytes;
     GrLfbWriteMode_t   writeMode;
     GrOriginLocation_t origin;
 } GrLfbInfo_t;
+ASSERT_GAME_LAYOUT(GrLfbInfo_t, 20);
 
 typedef int32_t GrLOD_t;
 #define GR_LOD_256              0x0
@@ -409,8 +410,9 @@ typedef struct {
     GrLOD_t           largeLod;
     GrAspectRatio_t   aspectRatio;
     GrTextureFormat_t format;
-    void              *data;
+    GameAddr          data;
 } GrTexInfo;
+ASSERT_GAME_LAYOUT(GrTexInfo, 20);
 
 typedef struct
 {

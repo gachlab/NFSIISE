@@ -2,6 +2,10 @@
 
 BUILD="x86"
 BUILD_TYPE="release"
+BUILD_64="no"
+CPP_EXTRA=""
+CC=${CC:-gcc}
+CXX=${CXX:-g++}
 BUILD_WINDOWS="no"
 OPENGL_DEFINE=""
 OPENGL_LIBS="-lGL"
@@ -67,7 +71,26 @@ function compile_x86
 
 function compile_cpp
 {
-	if [ $(uname -m) == "x86_64" ]; then
+	if [[ $BUILD_64 == "yes" ]]; then
+		#
+		# 64-bit build of the translated game.
+		#
+		# -no-pie is not optional. The game keeps real addresses in int32_t
+		# slots, so code and static data have to sit below 2 GiB; a position
+		# independent executable is loaded far above that and nothing works.
+		# Everything heap-allocated is handled separately by src/LowMem.c.
+		#
+		# -fpermissive downgrades the ~2286 "cast loses precision" errors that
+		# the truncation model produces by design. They are the intended
+		# behaviour, not oversights.
+		#
+		CPU_FLAGS="-no-pie -fno-pie"
+		CPP_EXTRA="-fpermissive -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast"
+
+		echo -n "Patching the translated game for 64-bit... "
+		python3 ../tools/patch_cpp_64bit > /dev/null || exit
+		echo "OK!"
+	elif [ $(uname -m) == "x86_64" ]; then
 		CPU_FLAGS="-m32"
 	fi
 
@@ -81,15 +104,15 @@ function compile_cpp
 	fi
 
 	echo -n "Compiling C++ code... "
-	clang -c -std=c++14 $CPU_FLAGS $CPP_LTO $FLAGS -Wno-c++11-narrowing -Wextra Cpp/NFS2SE.cpp -fno-rtti -fno-exceptions || exit
+	$CXX -c -std=c++14 $CPU_FLAGS $CPP_LTO $FLAGS $CPP_EXTRA -Wno-c++11-narrowing -Wextra Cpp/NFS2SE.cpp -fno-rtti -fno-exceptions || exit
 	echo "OK!"
 
 	echo -n "Compiling C code... "
-	clang -c -std=gnu89 -Wno-incompatible-function-pointer-types -Wno-int-conversion -Wall $CPU_FLAGS $FLAGS $OPENGL_DEFINE -DNFS_CPP *.c || exit
+	$CC -c -std=gnu89 -Wno-incompatible-function-pointer-types -Wno-int-conversion -Wall $CPU_FLAGS $FLAGS $OPENGL_DEFINE -DNFS_CPP *.c || exit
 	echo "OK!"
 
 	echo -n "Linking... "
-	clang -fuse-ld=lld -o "../Need For Speed II SE/nfs2se" $CPU_FLAGS $CPP_LTO *.o -lSDL2 $OPENGL_LIBS -lm || exit
+	$CXX -o "../Need For Speed II SE/nfs2se" $CPU_FLAGS $CPP_LTO *.o -lSDL2 $OPENGL_LIBS -lm -lpthread || exit
 	echo "OK!"
 
 	if [[ $BUILD_TYPE != "debug" ]]; then
@@ -107,6 +130,10 @@ do
 	case $key in
 		cpp|android)
 			BUILD=$key
+		;;
+		cpp64)
+			BUILD="cpp"
+			BUILD_64="yes"
 		;;
 		debug)
 			BUILD_TYPE="debug"
@@ -161,8 +188,9 @@ if [[ $BUILD != "android" ]]; then
 fi
 
 if [[ $BUILD == "cpp" ]]; then
-	if [[ $OS == "Darwin" ]]; then
-		echo "C++ translation is not supported on macOS"
+	if [[ $OS == "Darwin" ]] && [[ $BUILD_64 != "yes" ]]; then
+		echo "The 32-bit C++ translation cannot run on macOS (no 32-bit support since Catalina)."
+		echo "Use 'cpp64' instead."
 		exit 1
 	fi
 	if [[ $BUILD_WINDOWS == "yes" ]]; then

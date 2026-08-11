@@ -41,8 +41,11 @@
 			};
 		};
 		uint32_t pageSize;
-		void *minimumApplicationAddress;
-		void *maximumApplicationAddress;
+		/* Addresses as the game lays them out; see Wrapper.h. Widening these
+		 * would make GetSystemInfo's memset run off the end of the struct the
+		 * game reserved for it. */
+		GameAddr minimumApplicationAddress;
+		GameAddr maximumApplicationAddress;
 		uint32_t activeProcessorMask;
 		uint32_t numberOfProcessors;
 		uint32_t processorType;
@@ -50,13 +53,23 @@
 		uint16_t processorLevel;
 		uint16_t processorRevision;
 	} SYSTEM_INFO;
+	ASSERT_GAME_LAYOUT(SYSTEM_INFO, 36);
 
-	typedef struct
+	/*
+	 * Opaque to the game, which only ever allocates it (24 bytes, six pointer
+	 * slots on Win32) and hands the address back. The contents are ours, but
+	 * the SIZE is not: writing past 24 bytes corrupts whatever the game keeps
+	 * next to it. An SDL mutex handle is 8 bytes on a 64-bit host, so it is
+	 * stored numerically in the room two slots gave us, and the struct is
+	 * packed so that its alignment cannot reintroduce the padding.
+	 */
+	typedef struct __attribute__((packed))
 	{
-		void *reserved1, *reserved2, *reserved3;
-		SDL_mutex *mutex;
-		void *reserved4, *reserved5;
+		GameAddr reserved1, reserved2, reserved3;
+		uint64_t mutex;
+		GameAddr reserved4;
 	} CRITICAL_SECTION;
+	ASSERT_GAME_LAYOUT(CRITICAL_SECTION, 24);
 
 	typedef struct
 	{
@@ -69,10 +82,13 @@
 				uint32_t Offset;
 				uint32_t OffsetHigh;
 			};
-			void *Pointer;
+			GameAddr Pointer;
 		};
-		void *hEvent;
+		/* An Event handle the game got from CreateEvent -- its handle, its
+		 * width. */
+		GameAddr hEvent;
 	} OVERLAPPED;
+	ASSERT_GAME_LAYOUT(OVERLAPPED, 20);
 
 	typedef struct
 	{

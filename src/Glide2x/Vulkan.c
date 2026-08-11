@@ -34,6 +34,7 @@
 //    small pool instead.
 
 #include "../Glide2x.h"
+#include "../LowMem.h"
 
 #include <SDL2/SDL_stdinc.h>
 #include <SDL2/SDL_video.h>

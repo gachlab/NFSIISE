@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "Wrapper.h"
+#include "LowMem.h"
 
 extern BOOL linearSoundInterpolation;
 
@@ -28,14 +29,37 @@ static SDL_AudioDeviceID audioDevice;
 static BOOL unPaused, canGetSamples;
 static uint32_t buffer_pos;
 static uint8_t *buffer;
+/*
+ * The game writes samples through a pointer we hand it, and it keeps that
+ * pointer in a 32-bit register. SDL's stream buffer, and anything on the C
+ * stack, live far above 2 GiB on a 64-bit host, so neither can be given to it
+ * directly -- the address arrives truncated and the game scribbles on whatever
+ * happens to be at the low half. Everything the game fills in goes through
+ * this instead, and is copied out afterwards.
+ */
+#define GAME_SCRATCH_SAMPLES 256
+static uint8_t *gameScratch;
+
+static uint8_t *getGameScratch(void)
+{
+	if (!gameScratch)
+		gameScratch = (uint8_t *)lowMemAlloc(GAME_SCRATCH_SAMPLES * CHN_CNT * sizeof(int16_t));
+	return gameScratch;
+}
 
 static void audioCallback(void *userdata, uint8_t *stream, int32_t len)
 {
 	if (!buffer)
 	{
 		int32_t i;
-		for (i = 0; i < len; i += 256 * CHN_CNT * sizeof(int16_t))
-			getSamplesFunc(stream + i, 256);
+		uint8_t *scratch = getGameScratch();
+		const int32_t chunk = 256 * CHN_CNT * sizeof(int16_t);
+		for (i = 0; i < len; i += chunk)
+		{
+			int32_t remaining = len - i;
+			getSamplesFunc(scratch, 256);
+			memcpy(stream + i, scratch, remaining < chunk ? remaining : chunk);
+		}
 	}
 	else
 	{
@@ -50,7 +74,7 @@ static void audioCallback(void *userdata, uint8_t *stream, int32_t len)
 }
 static void audioCallbackInterp(void *userdata, uint8_t *stream, int32_t len)
 {
-	int16_t samples[256 * CHN_CNT];
+	int16_t *samples = (int16_t *)getGameScratch();
 	int16_t *buffer_16b;
 	uint32_t i, c;
 	while (buffer_pos < len)
@@ -111,7 +135,7 @@ REALIGN REGPARM uint32_t iSNDdirectstart_(uint32_t arg1, void *hWnd)
 	SDL_AudioSpec audioSpecOut;
 	audioDevice = SDL_OpenAudioDevice(NULL, 0, &audioSpecIn, &audioSpecOut, 0);
 	if (!audioDevice)
-		buffer = (uint8_t *)malloc(256 * CHN_CNT * sizeof(int16_t));
+		buffer = (uint8_t *)lowMemAlloc(256 * CHN_CNT * sizeof(int16_t));
 	else
 	{
 		uint32_t bufferSize = (audioSpecOut.samples + 255) & ~255; //Aligned to 256
@@ -119,7 +143,7 @@ REALIGN REGPARM uint32_t iSNDdirectstart_(uint32_t arg1, void *hWnd)
 		{
 			bufferSize += linearSoundInterpolation ? 512 : 256;
 			bufferSize *= CHN_CNT * sizeof(int16_t);
-			buffer = (uint8_t *)malloc(bufferSize);
+			buffer = (uint8_t *)lowMemAlloc(bufferSize);
 		}
 	}
 	canGetSamples = true;
@@ -153,7 +177,7 @@ REALIGN uint32_t iSNDdirectstop_(void)
 		audioDevice = 0;
 	}
 	buffer_pos = 0;
-	free(buffer);
+	lowMemFree(buffer);
 	buffer = NULL;
 	return 0;
 }

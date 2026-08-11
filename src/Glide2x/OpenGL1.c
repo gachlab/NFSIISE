@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "../Glide2x.h"
+#include "../LowMem.h"
 
 #include <SDL2/SDL_stdinc.h>
 #include <SDL2/SDL_opengl.h>
@@ -291,7 +292,7 @@ REALIGN STDCALL BOOL grLfbLock(GrLock_t type, GrBuffer_t buffer, GrLfbWriteMode_
 	memset(info, 0, sizeof(GrLfbInfo_t));
 	if (type == GR_LFB_WRITE_ONLY)
 	{
-		info->lfbPtr = lfb = (uint8_t *)malloc(640*480*2);
+		info->lfbPtr = GAME_ADDR(lfb = (uint8_t *)lowMemAlloc(640*480*2));
 		info->strideInBytes = 2;
 		return true;
 	}
@@ -300,7 +301,7 @@ REALIGN STDCALL BOOL grLfbLock(GrLock_t type, GrBuffer_t buffer, GrLfbWriteMode_
 REALIGN STDCALL BOOL grLfbUnlock(GrLock_t type, GrBuffer_t buffer)
 {
 	//TODO Remove this
-	free(lfb);
+	lowMemFree(lfb);
 	lfb = NULL;
 	return true;
 }
@@ -393,7 +394,7 @@ REALIGN STDCALL void grTexCombineFunction(GrChipID_t tmu, GrTextureCombineFnc_t 
 REALIGN STDCALL void grTexDownloadMipMap(GrChipID_t tmu, uint32_t startAddress, uint32_t evenOdd, GrTexInfo *info)
 {
 	TextureInfo *ti = &textures[startAddress >> 2];
-	uint8_t *data = (uint8_t *)info->data;
+	uint8_t *data = (uint8_t *)GAME_PTR(info->data);
 	uint32_t size = 256 >> info->largeLod;
 	BOOL newTexture = (ti->id == 0);
 
@@ -411,7 +412,7 @@ REALIGN STDCALL void grTexDownloadMipMap(GrChipID_t tmu, uint32_t startAddress, 
 		case GR_TEXFMT_P_8:
 			ti->data = &textureMem[startAddress];
 			ti->palette = NULL;
-			memcpy(ti->data, info->data, size * size);
+			memcpy(ti->data, GAME_PTR(info->data), size * size);
 			break;
 		case GR_TEXFMT_RGB_565:
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, size, size, 0, GL_RGB, GL_UNSIGNED_SHORT_5_6_5, data);
