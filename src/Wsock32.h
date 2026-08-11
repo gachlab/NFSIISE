@@ -22,14 +22,22 @@
 		int fd_array[64];
 	};
 
+	/*
+	 * Returned to the game, which keeps the whole thing at 32-bit widths.
+	 * Native pointers would both resize it and hold addresses the game cannot
+	 * represent, so the contents are copied below 2 GiB and referred to by
+	 * GameAddr. See gethostbyname_wrap.
+	 */
 	struct win_hostent
 	{
-		char *h_name;
-		char **h_aliases;
+		GameAddr h_name;        /* char *  */
+		GameAddr h_aliases;     /* char ** */
 		int16_t h_addrtype;
 		int16_t h_length;
-		char **h_addr_list;
+		GameAddr h_addr_list;   /* char ** */
 	};
+	typedef struct win_hostent win_hostent_t;
+	ASSERT_GAME_LAYOUT(win_hostent_t, 16);
 #else
 	#include <winsock2.h>
 
