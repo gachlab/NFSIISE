@@ -979,7 +979,7 @@ MAYBE_STATIC REALIGN STDCALL uint32_t EnumDevices(void **this, uint32_t devType,
 		deviceInstance->guidInstance.a = JOYSTICK;
 		deviceInstance->guidInstance.b = i;
 #ifdef NFS_CPP
-		if (!wrap_stdcall2_ret(dinput_game_thread, callback, deviceInstance, ref))
+		if (!wrap_stdcall2_ret(dinput_game_thread, callback, GAME_ADDR(deviceInstance), GAME_ADDR(ref)))
 #else
 		if (!callback(deviceInstance, ref))
 #endif

@@ -11,8 +11,15 @@ static void (REGPARM *getSamples)(void *samples, uint32_t num_samples_per_chn);
 	void wrap_regparm2(void *this, void *func, int32_t arg0, int32_t arg1);
 	extern void *audio_game_thread;
 
+	/*
+	 * The game takes the sample buffer in a 32-bit register, so the truncation
+	 * is deliberate -- every buffer passed here comes from LowMem and fits.
+	 * Spelling it out keeps the build quiet, so that an accidental truncation
+	 * somewhere else still shows up as a warning instead of being lost in the
+	 * noise.
+	 */
 	#define getSamplesFunc(a,b) \
-		wrap_regparm2(audio_game_thread, getSamples, a, b)
+		wrap_regparm2(audio_game_thread, getSamples, GAME_ADDR(a), b)
 #else
 	#define getSamplesFunc(a,b) \
 		getSamples(a, b)

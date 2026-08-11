@@ -95,11 +95,11 @@ function compile_cpp
 	fi
 
 	if [[ $BUILD_TYPE == "debug" ]]; then
-		FLAGS="-O0 -g"
+		FLAGS="-O0 -g -fno-strict-aliasing"
 		CPP_LTO=""
 		echo "Debug"
 	else
-		FLAGS="-O3 -DNDEBUG"
+		FLAGS="-O3 -DNDEBUG -fno-strict-aliasing"
 		echo "Release"
 	fi
 

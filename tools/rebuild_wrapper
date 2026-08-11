@@ -21,9 +21,13 @@ cd "$(dirname "$0")/.."
 
 BACKEND=${1:-vulkan}
 BUILD_TYPE=${2:-debug}
+set -- "$1" "$BUILD_TYPE"
 
-CACHE="build/NFS2SE.cpp64.o"
-STAMP="build/NFS2SE.cpp64.stamp"
+# Keyed on the build type as well as the source: a cache that ignored the flags
+# would happily link a -O0 translation into a release build and quietly hand
+# back something several times slower.
+CACHE="build/NFS2SE.cpp64.$2.o"
+STAMP="build/NFS2SE.cpp64.$2.stamp"
 
 case "$BACKEND" in
 	vulkan) GFX_DEFINE="-DVULKAN"; GFX_LIBS="-lvulkan" ;;
@@ -33,9 +37,9 @@ case "$BACKEND" in
 esac
 
 if [ "$BUILD_TYPE" == "debug" ]; then
-	FLAGS="-O0 -g"
+	FLAGS="-O0 -g -fno-strict-aliasing"
 else
-	FLAGS="-O3 -DNDEBUG"
+	FLAGS="-O3 -DNDEBUG -fno-strict-aliasing"
 fi
 
 CPU_FLAGS="-no-pie -fno-pie"

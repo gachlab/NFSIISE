@@ -105,6 +105,36 @@ typedef uint32_t GameAddr32;
         "\tGame *new_game_ctx = (Game *)malloc(sizeof(Game));",
         "\tGame *new_game_ctx = (Game *)lowMemAlloc(sizeof(Game));",
     ),
+    (
+        "entry point Game contexts",
+        '''extern "C" void nfs2seEntrypoint()
+{
+\tGame game, audio;
+\tmain_game_thread = &game;
+\taudio_game_thread = &audio;
+\tgame._start();
+}''',
+        '''extern "C" void nfs2seEntrypoint()
+{
+\t/*
+\t * These cannot be locals on a 64-bit build. The translation hands the
+\t * context to the wrapper as `(int32_t)this` -- six call sites do it, e.g.
+\t * DirectInputCreateA_wrap -- which is lossless when a pointer is 4 bytes
+\t * and throws away the upper half when it is 8. The real thread stack lives
+\t * around 0x7fff..., so a local arrives as a truncated address that faults
+\t * the moment the wrapper calls back into the game through it.
+\t *
+\t * Allocating them below 2 GiB makes that truncation lossless again, which
+\t * is the same bargain the rest of the port makes. Deliberately never freed:
+\t * they live for the whole process and the game exits through exit().
+\t */
+\tGame *game = new (lowMemAlloc(sizeof(Game))) Game();
+\tGame *audio = new (lowMemAlloc(sizeof(Game))) Game();
+\tmain_game_thread = game;
+\taudio_game_thread = audio;
+\tgame->_start();
+}''',
+    ),
 ]
 
 
