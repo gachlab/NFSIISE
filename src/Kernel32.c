@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "Kernel32.h"
+#include "LowMem.h"
 
 #include <SDL2/SDL_timer.h>
 
@@ -238,7 +239,7 @@ static int threadFunction(void *data)
 
 REALIGN STDCALL void *CreateThread_wrap(void *threadAttributes, uint32_t stackSize, THREAD_START_ROUTINE startAddress, void *parameter, uint32_t creationFlags, uint32_t *threadId)
 {
-	Thread *thread = (Thread *)malloc(sizeof(Thread));
+	Thread *thread = (Thread *)lowMemAlloc(sizeof(Thread));
 	thread->handleType = HandleThread;
 #ifdef NFS_CPP
 	thread->function = startAddress;
@@ -276,20 +277,20 @@ REALIGN STDCALL BOOL TerminateThread_wrap(Thread *thread, uint32_t exitCode)
 }
 REALIGN STDCALL void InitializeCriticalSection_wrap(CRITICAL_SECTION *criticalSection)
 {
-	criticalSection->mutex = SDL_CreateMutex();
+	criticalSection->mutex = (uint64_t)(uintptr_t)SDL_CreateMutex();
 }
 REALIGN STDCALL void EnterCriticalSection_wrap(CRITICAL_SECTION *criticalSection)
 {
-	SDL_LockMutex(criticalSection->mutex);
+	SDL_LockMutex((SDL_mutex *)(uintptr_t)criticalSection->mutex);
 }
 REALIGN STDCALL void LeaveCriticalSection_wrap(CRITICAL_SECTION *criticalSection)
 {
-	SDL_UnlockMutex(criticalSection->mutex);
+	SDL_UnlockMutex((SDL_mutex *)(uintptr_t)criticalSection->mutex);
 }
 REALIGN STDCALL void DeleteCriticalSection_wrap(CRITICAL_SECTION *criticalSection)
 {
-	SDL_DestroyMutex(criticalSection->mutex);
-	criticalSection->mutex = NULL;
+	SDL_DestroyMutex((SDL_mutex *)(uintptr_t)criticalSection->mutex);
+	criticalSection->mutex = 0;
 }
 
 REALIGN STDCALL void GlobalMemoryStatus_wrap(MEMORYSTATUS *memoryStatus)
@@ -328,7 +329,7 @@ REALIGN STDCALL uint32_t GetLastError_wrap(void)
 
 REALIGN STDCALL Event *CreateEventA_wrap(SECURITY_ATTRIBUTES *eventAttributes, BOOL manualReset, BOOL initialState, const char *name)
 {
-	Event *event = (Event *)malloc(sizeof(Event));
+	Event *event = (Event *)lowMemAlloc(sizeof(Event));
 	event->handleType = HandleEvent;
 	event->manualReset = manualReset;
 	event->is_set = initialState;
@@ -346,7 +347,13 @@ REALIGN STDCALL BOOL SetEvent_wrap(Event *event)
 	}
 	return false;
 }
-REALIGN STDCALL uint32_t WaitForMultipleObjects_wrap(uint32_t count, Event *const *events, BOOL waitAll, uint32_t milliseconds)
+/*
+ * The game passes an array of handles, and its handles are 4 bytes each.
+ * Indexing it as Event *const * strides by 8 in a 64-bit build, so entry 1
+ * onwards is read from the wrong place and entry 0 comes back with garbage in
+ * its high half. Read the array at the game's element width instead.
+ */
+REALIGN STDCALL uint32_t WaitForMultipleObjects_wrap(uint32_t count, const GameAddr *events, BOOL waitAll, uint32_t milliseconds)
 {
 	//milliseconds always -1 or 0
 	//waitAll always false
@@ -356,12 +363,13 @@ REALIGN STDCALL uint32_t WaitForMultipleObjects_wrap(uint32_t count, Event *cons
 	{
 		for (i = 0; i != count; ++i)
 		{
-			if (events[i]->is_set)
+			Event *event = (Event *)GAME_PTR(events[i]);
+			if (event->is_set)
 			{
 				if (ret == WAIT_TIMEOUT)
 					ret = i;
-				if (!events[i]->manualReset)
-					events[i]->is_set = false;
+				if (!event->manualReset)
+					event->is_set = false;
 			}
 		}
 		if (ret != WAIT_TIMEOUT || !milliseconds)
@@ -413,7 +421,7 @@ static int serialPortThread(void *data)
 				break;
 			}
 		}
-		SetEvent_wrap(file->readOverlapped->hEvent);
+		SetEvent_wrap((Event *)GAME_PTR(file->readOverlapped->hEvent));
 		if (!file->pending)
 		{
 			SDL_UnlockMutex(file->mutex);
@@ -448,7 +456,7 @@ REALIGN STDCALL File *CreateFileA_wrap(const char *fileName, uint32_t desiredAcc
 	}
 	if (fd > 0)
 	{
-		file = calloc(1, sizeof(File));
+		file = lowMemCalloc(1, sizeof(File));
 		file->handleType = HandleFile;
 		if ((file->async = !!(flagsAndAttributes & 0x40000000 /* Overlapped, async mode */)))
 			file->mutex = SDL_CreateMutex();
@@ -468,7 +476,7 @@ REALIGN STDCALL uint32_t GetFileSize_wrap(File *file, uint32_t *fileSizeHigh)
 }
 REALIGN STDCALL FileMapping *CreateFileMappingA_wrap(File *file, SECURITY_ATTRIBUTES *fileMappingAttributes, uint32_t protect, uint32_t maximumSizeHigh, uint32_t maximumSizeLow, const char *name)
 {
-	FileMapping *fileMapping = (FileMapping *)malloc(sizeof(FileMapping));
+	FileMapping *fileMapping = (FileMapping *)lowMemAlloc(sizeof(FileMapping));
 	fileMapping->handleType = HandleFileMapping;
 	fileMapping->fd = file->fd;
 	return fileMapping;
@@ -482,7 +490,7 @@ REALIGN STDCALL void *MapViewOfFile_wrap(FileMapping *fMapping, uint32_t desired
 	{
 		off_t pos = lseek(fMapping->fd, 0, SEEK_CUR);
 		lseek(fMapping->fd, 0, SEEK_SET);
-		fileMap = malloc(size + 4);
+		fileMap = lowMemAlloc(size + 4);
 		read(fMapping->fd, fileMap, size);
 		lseek(fMapping->fd, pos, SEEK_SET);
 	}
@@ -490,7 +498,7 @@ REALIGN STDCALL void *MapViewOfFile_wrap(FileMapping *fMapping, uint32_t desired
 }
 REALIGN STDCALL BOOL UnmapViewOfFile_wrap(const void *lpBaseAddress)
 {
-	free((void *)lpBaseAddress);
+	lowMemFree((void *)lpBaseAddress);
 	return true;
 }
 REALIGN STDCALL BOOL FlusfileBuffers_wrap(File *file)
@@ -525,7 +533,7 @@ REALIGN STDCALL BOOL WriteFile_wrap(File *file, const void *buffer, uint32_t num
 	if (hasEvent)
 	{
 		SDL_LockMutex(event_mutex);
-		((Event *)overlapped->hEvent)->is_set = false;
+		((Event *)GAME_PTR(overlapped->hEvent))->is_set = false;
 		SDL_UnlockMutex(event_mutex);
 	}
 	*numberOfBytesWritten = write(file->fd, buffer, numberOfBytesToWrite);
@@ -533,7 +541,7 @@ REALIGN STDCALL BOOL WriteFile_wrap(File *file, const void *buffer, uint32_t num
 	if (hasEvent && ret)
 	{
 		tcdrain(file->fd);
-		SetEvent_wrap(overlapped->hEvent);
+		SetEvent_wrap((Event *)GAME_PTR(overlapped->hEvent));
 	}
 	return ret;
 }
@@ -546,7 +554,7 @@ REALIGN STDCALL BOOL ReadFile_wrap(File *file, void *buffer, uint32_t numberOfBy
 			SDL_LockMutex(file->mutex);
 
 			SDL_LockMutex(event_mutex);
-			((Event *)overlapped->hEvent)->is_set = false;
+			((Event *)GAME_PTR(overlapped->hEvent))->is_set = false;
 			SDL_UnlockMutex(event_mutex);
 
 			file->asyncReadBuffer = buffer;
@@ -618,7 +626,7 @@ REALIGN STDCALL BOOL CloseHandle_wrap(void *handle)
 		case HandleThread:
 		{
 			Thread *thread = (Thread *)handle;
-			free(thread);
+			lowMemFree(thread);
 			return true;
 		}
 		case HandleFile:
@@ -630,19 +638,19 @@ REALIGN STDCALL BOOL CloseHandle_wrap(void *handle)
 			while (file->pending) //Cannot wait for finished, because thread is detached
 				SDL_Delay(10);
 			SDL_DestroyMutex(file->mutex);
-			free(file);
+			lowMemFree(file);
 			return true;
 		}
 		case HandleFileMapping:
 		{
 			FileMapping *fMapping = (FileMapping *)handle;
-			free(fMapping);
+			lowMemFree(fMapping);
 			return true;
 		}
 		case HandleEvent:
 		{
 			Event *event = (Event *)handle;
-			free(event);
+			lowMemFree(event);
 			return true;
 		}
 	}
@@ -703,7 +711,7 @@ REALIGN STDCALL BOOL FindClose_wrap(FindFile *findFile)
 		if (findFile->dir)
 			closedir(findFile->dir);
 		free(findFile->filter);
-		free(findFile);
+		lowMemFree(findFile);
 		return true;
 	}
 	return false;
@@ -719,7 +727,7 @@ REALIGN STDCALL FindFile *FindFirstFileA_wrap(const char *fileName, WIN32_FIND_D
 	if (!dir)
 		return (FindFile *)-1;
 
-	FindFile *findFile = (FindFile *)malloc(sizeof(FindFile));
+	FindFile *findFile = (FindFile *)lowMemAlloc(sizeof(FindFile));
 	findFile->dir = dir;
 	findFile->filter = strdup(fileName);
 

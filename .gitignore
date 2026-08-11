@@ -18,3 +18,6 @@ tools/glide_replay_*
 bench_*.png
 Need For Speed II SE/nfs2se.conf
 Need For Speed II SE/nfs2se.conf.bench-backup
+
+# Fast rebuild cache (tools/rebuild_wrapper)
+build/

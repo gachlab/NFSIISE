@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "DInput.h"
+#include "LowMem.h"
 
 #ifdef NFS_CPP
 	void Release_wrap(void *);
@@ -363,7 +364,7 @@ static void setEffect(DirectInputEffect *dinputEffect, const DIEFFECT *di_eff)
 	{
 		case FORCE_CONST:
 		{
-			const DICONSTANTFORCE *di_constant = (const DICONSTANTFORCE *)di_eff->typeSpecificParams;
+			const DICONSTANTFORCE *di_constant = (const DICONSTANTFORCE *)GAME_PTR(di_eff->typeSpecificParams);
 			switch (dinputEffect->effect.type)
 			{
 				case SDL_HAPTIC_CONSTANT:
@@ -374,7 +375,7 @@ static void setEffect(DirectInputEffect *dinputEffect, const DIEFFECT *di_eff)
 					if (dinputEffect->useCartesian)
 					{
 						sdl_constant->direction.type = SDL_HAPTIC_CARTESIAN;
-						int32_t direction = di_eff->rglDirection[0] / 100;
+						int32_t direction = ((const uint32_t *)GAME_PTR(di_eff->rglDirection))[0] / 100;
 	//					fprintf(stderr, "Constant: %d\n", direction);
 						if (direction > 0 && direction < 180)
 						{
@@ -413,7 +414,7 @@ static void setEffect(DirectInputEffect *dinputEffect, const DIEFFECT *di_eff)
 					else
 					{
 						sdl_constant->direction.type = SDL_HAPTIC_POLAR;
-						sdl_constant->direction.dir[0] = di_eff->rglDirection[0];
+						sdl_constant->direction.dir[0] = ((const uint32_t *)GAME_PTR(di_eff->rglDirection))[0];
 					}
 					break;
 				}
@@ -434,7 +435,7 @@ static void setEffect(DirectInputEffect *dinputEffect, const DIEFFECT *di_eff)
 		}
 		case FORCE_SQUARE:
 		{
-			const DIPERIODIC *di_periodic = (const DIPERIODIC *)di_eff->typeSpecificParams;
+			const DIPERIODIC *di_periodic = (const DIPERIODIC *)GAME_PTR(di_eff->typeSpecificParams);
 			switch (dinputEffect->effect.type)
 			{
 				case SDL_HAPTIC_SINE:
@@ -462,7 +463,7 @@ static void setEffect(DirectInputEffect *dinputEffect, const DIEFFECT *di_eff)
 		}
 		case FORCE_SPRING:
 		{
-			const DICONDITION *di_condition = (const DICONDITION *)di_eff->typeSpecificParams;
+			const DICONDITION *di_condition = (const DICONDITION *)GAME_PTR(di_eff->typeSpecificParams);
 			SDL_HapticCondition *sdl_condition = &dinputEffect->effect.condition;
 			sdl_condition->length = length;
 			sdl_condition->center[0] = convertDiToS16(di_condition[0].offset);
@@ -538,7 +539,7 @@ MAYBE_STATIC REALIGN STDCALL uint32_t Release(void **this)
 
 			int32_t i;
 			for (i = 0; i != dinputDev->num_effects; ++i)
-				free((void *)dinputDev->effects[i] - sizeof(DirectInputObject));
+				lowMemFree((void *)dinputDev->effects[i] - sizeof(DirectInputObject));
 			free(dinputDev->effects);
 
 			if (dinputDev->haptic)
@@ -551,8 +552,8 @@ MAYBE_STATIC REALIGN STDCALL uint32_t Release(void **this)
 		}
 	}
 
-	free(dinputObj);
-	free(this);
+	lowMemFree(dinputObj);
+	lowMemFree(this);
 
 //	fprintf(stderr, "Release: 0x%p\n", *this);
 	return 0;
@@ -826,17 +827,17 @@ MAYBE_STATIC REALIGN STDCALL uint32_t SetCooperativeLevel(DirectInputDevice **th
 MAYBE_STATIC REALIGN STDCALL uint32_t CreateEffect(DirectInputDevice **this, const GUID *const rguid, const DIEFFECT *di_eff, DirectInputEffect ***deff, void *punkOuter)
 {
 	/* Joystick only */
-	DirectInputEffect *dinput_eff = (DirectInputEffect *)calloc(1, sizeof(DirectInputObject) + sizeof(DirectInputEffect));
+	DirectInputEffect *dinput_eff = (DirectInputEffect *)lowMemCalloc(1, sizeof(DirectInputObject) + sizeof(DirectInputEffect));
 	((DirectInputObject *)dinput_eff)->ref = 1;
 	dinput_eff = (void *)dinput_eff + sizeof(DirectInputObject);
 	dinput_eff->gain = &(*this)->gain;
 	dinput_eff->effect_idx = -1;
 
-	dinput_eff->SetParameters = WRAP_NAME(SetParameters);
-	dinput_eff->Start = WRAP_NAME(Start);
-	dinput_eff->Stop = WRAP_NAME(Stop);
-	dinput_eff->Download = WRAP_NAME(Download);
-	dinput_eff->Unload = WRAP_NAME(Unload);
+	dinput_eff->SetParameters = GAME_ADDR(WRAP_NAME(SetParameters));
+	dinput_eff->Start = GAME_ADDR(WRAP_NAME(Start));
+	dinput_eff->Stop = GAME_ADDR(WRAP_NAME(Stop));
+	dinput_eff->Download = GAME_ADDR(WRAP_NAME(Download));
+	dinput_eff->Unload = GAME_ADDR(WRAP_NAME(Unload));
 
 	memcpy(&dinput_eff->guid, rguid, sizeof(GUID));
 
@@ -845,8 +846,19 @@ MAYBE_STATIC REALIGN STDCALL uint32_t CreateEffect(DirectInputDevice **this, con
 
 //	fprintf(stderr, "%X %X %d\n", dinputEff->guid.a, dinputEff->effect.type, dinputEff->effect_idx);
 
-	*deff = malloc(sizeof(void *));
-	**deff = dinput_eff;
+	/*
+	 * deff points at a 4-byte slot in the game's memory, so it can only be
+	 * written 4 bytes at a time -- assigning a pointer straight to *deff
+	 * overruns into whatever the game keeps next to it. The interface slot
+	 * itself stays pointer sized because the wrapper reads it back with
+	 * *this; the game only ever reads its low half, which holds the entire
+	 * address since everything here is allocated below 2 GiB.
+	 */
+	{
+		DirectInputEffect **iface = (DirectInputEffect **)lowMemAlloc(sizeof(void *));
+		*iface = dinput_eff;
+		*(GameAddr *)deff = GAME_ADDR(iface);
+	}
 
 	(*this)->num_effects += 1;
 
@@ -905,27 +917,27 @@ MAYBE_STATIC REALIGN STDCALL uint32_t Poll(DirectInputDevice **this)
 
 MAYBE_STATIC REALIGN STDCALL uint32_t CreateDevice(void **this, const GUID *const rguid, DirectInputDevice ***directInputDevice, void *unkOuter)
 {
-	DirectInputDevice *dinputDev = (DirectInputDevice *)calloc(1, sizeof(DirectInputObject) + sizeof(DirectInputDevice));
+	DirectInputDevice *dinputDev = (DirectInputDevice *)lowMemCalloc(1, sizeof(DirectInputObject) + sizeof(DirectInputDevice));
 	((DirectInputObject *)dinputDev)->ref = 1;
 	((DirectInputObject *)dinputDev)->is_device = true;
 	dinputDev = (void *)dinputDev + sizeof(DirectInputObject);
 
-	dinputDev->QueryInterface = WRAP_NAME(QueryInterface);
-	dinputDev->Release = WRAP_NAME(Release);
+	dinputDev->QueryInterface = GAME_ADDR(WRAP_NAME(QueryInterface));
+	dinputDev->Release = GAME_ADDR(WRAP_NAME(Release));
 
-	dinputDev->GetCapabilities = WRAP_NAME(GetCapabilities);
-	dinputDev->SetProperty = WRAP_NAME(SetProperty);
-	dinputDev->Acquire = WRAP_NAME(Acquire);
-	dinputDev->Unacquire = WRAP_NAME(Unacquire);
-	dinputDev->GetDeviceState = WRAP_NAME(GetDeviceState);
-	dinputDev->GetDeviceData = WRAP_NAME(GetDeviceData);
-	dinputDev->SetDataFormat = WRAP_NAME(SetDataFormat);
-	dinputDev->SetEventNotification = WRAP_NAME(SetEventNotification);
-	dinputDev->SetCooperativeLevel = WRAP_NAME(SetCooperativeLevel);
-	dinputDev->GetObjectInfo = WRAP_NAME(GetObjectInfo);
-	dinputDev->CreateEffect = WRAP_NAME(CreateEffect);
-	dinputDev->SendForceFeedbackCommand = WRAP_NAME(SendForceFeedbackCommand);
-	dinputDev->Poll = WRAP_NAME(Poll);
+	dinputDev->GetCapabilities = GAME_ADDR(WRAP_NAME(GetCapabilities));
+	dinputDev->SetProperty = GAME_ADDR(WRAP_NAME(SetProperty));
+	dinputDev->Acquire = GAME_ADDR(WRAP_NAME(Acquire));
+	dinputDev->Unacquire = GAME_ADDR(WRAP_NAME(Unacquire));
+	dinputDev->GetDeviceState = GAME_ADDR(WRAP_NAME(GetDeviceState));
+	dinputDev->GetDeviceData = GAME_ADDR(WRAP_NAME(GetDeviceData));
+	dinputDev->SetDataFormat = GAME_ADDR(WRAP_NAME(SetDataFormat));
+	dinputDev->SetEventNotification = GAME_ADDR(WRAP_NAME(SetEventNotification));
+	dinputDev->SetCooperativeLevel = GAME_ADDR(WRAP_NAME(SetCooperativeLevel));
+	dinputDev->GetObjectInfo = GAME_ADDR(WRAP_NAME(GetObjectInfo));
+	dinputDev->CreateEffect = GAME_ADDR(WRAP_NAME(CreateEffect));
+	dinputDev->SendForceFeedbackCommand = GAME_ADDR(WRAP_NAME(SendForceFeedbackCommand));
+	dinputDev->Poll = GAME_ADDR(WRAP_NAME(Poll));
 
 	memcpy(&dinputDev->guid, rguid, sizeof(GUID));
 
@@ -933,13 +945,16 @@ MAYBE_STATIC REALIGN STDCALL uint32_t CreateDevice(void **this, const GUID *cons
 
 	if (dinputDev->guid.a == MOUSE || dinputDev->guid.a == JOYSTICK)
 	{
-		*directInputDevice = malloc(sizeof(void *));
-		**directInputDevice = dinputDev;
+		{
+			DirectInputDevice **iface = (DirectInputDevice **)lowMemAlloc(sizeof(void *));
+			*iface = dinputDev;
+			*(GameAddr *)directInputDevice = GAME_ADDR(iface);
+		}
 		return 0;
 	}
 
 //	fprintf(stderr, "CreateDevice: error 0x%.8X\n", dinputDev->guid.a);
-	free((void *)dinputDev - sizeof(DirectInputObject));
+	lowMemFree((void *)dinputDev - sizeof(DirectInputObject));
 	return -1;
 }
 MAYBE_STATIC REALIGN STDCALL uint32_t EnumDevices(void **this, uint32_t devType, DIENUMDEVICESCALLBACKA callback, void *ref, uint32_t dwFlags)
@@ -948,20 +963,32 @@ MAYBE_STATIC REALIGN STDCALL uint32_t EnumDevices(void **this, uint32_t devType,
 		return 0;
 
 	uint32_t i;
+	/*
+	 * This buffer's address is handed to a callback inside the game, which
+	 * stores it in a 32-bit slot. A stack local will not do on a 64-bit build:
+	 * the real thread stack lives around 0x7fff..., and truncating that gives
+	 * the game a nonsense pointer. Allocate it below 2 GiB instead.
+	 */
+	DIDEVICEINSTANCEA *deviceInstance = (DIDEVICEINSTANCEA *)lowMemAlloc(sizeof(DIDEVICEINSTANCEA));
+	if (!deviceInstance)
+		return 0;
+
 	for (i = 0; i < 2; ++i)
 	{
-		DIDEVICEINSTANCEA deviceInstance = {0};
-		deviceInstance.guidInstance.a = JOYSTICK;
-		deviceInstance.guidInstance.b = i;
+		memset(deviceInstance, 0, sizeof *deviceInstance);
+		deviceInstance->guidInstance.a = JOYSTICK;
+		deviceInstance->guidInstance.b = i;
 #ifdef NFS_CPP
-		if (!wrap_stdcall2_ret(dinput_game_thread, callback, &deviceInstance, ref))
+		if (!wrap_stdcall2_ret(dinput_game_thread, callback, GAME_ADDR(deviceInstance), GAME_ADDR(ref)))
 #else
-		if (!callback(&deviceInstance, ref))
+		if (!callback(deviceInstance, ref))
 #endif
 		{
 			break;
 		}
 	}
+
+	lowMemFree(deviceInstance);
 	return 0;
 }
 
@@ -969,16 +996,19 @@ MAYBE_STATIC REALIGN STDCALL uint32_t EnumDevices(void **this, uint32_t devType,
 
 REALIGN STDCALL uint32_t DirectInputCreateA_wrap(MAYBE_THIS void *hInstance, uint32_t version, DirectInput ***directInputA, void *unkOuter)
 {
-	DirectInput *dinput = (DirectInput *)calloc(1, sizeof(DirectInputObject) + sizeof(DirectInput));
+	DirectInput *dinput = (DirectInput *)lowMemCalloc(1, sizeof(DirectInputObject) + sizeof(DirectInput));
 	((DirectInputObject *)dinput)->ref = 1;
 	dinput = (void *)dinput + sizeof(DirectInputObject);
 
-	dinput->Release = WRAP_NAME(Release);
-	dinput->CreateDevice = WRAP_NAME(CreateDevice);
-	dinput->EnumDevices = WRAP_NAME(EnumDevices);
+	dinput->Release = GAME_ADDR(WRAP_NAME(Release));
+	dinput->CreateDevice = GAME_ADDR(WRAP_NAME(CreateDevice));
+	dinput->EnumDevices = GAME_ADDR(WRAP_NAME(EnumDevices));
 
-	*directInputA = malloc(sizeof(void *));
-	**directInputA = dinput;
+	{
+		DirectInput **iface = (DirectInput **)lowMemAlloc(sizeof(void *));
+		*iface = dinput;
+		*(GameAddr *)directInputA = GAME_ADDR(iface);
+	}
 
 #ifdef NFS_CPP
 	dinput_game_thread = this;

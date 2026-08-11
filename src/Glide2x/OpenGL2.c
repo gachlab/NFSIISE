@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "../Glide2x.h"
+#include "../LowMem.h"
 
 #include <SDL2/SDL_stdinc.h>
 #include <SDL2/SDL_video.h>
@@ -1047,7 +1048,7 @@ REALIGN STDCALL BOOL grLfbLock(GrLock_t type, GrBuffer_t buffer, GrLfbWriteMode_
 	memset(info, 0, sizeof(GrLfbInfo_t));
 	if (type == GR_LFB_WRITE_ONLY)
 	{
-		info->lfbPtr = g_lfb = (uint8_t *)malloc(640*480*2);
+		info->lfbPtr = GAME_ADDR(g_lfb = (uint8_t *)lowMemAlloc(640*480*2));
 		info->strideInBytes = 2;
 		return true;
 	}
@@ -1056,7 +1057,7 @@ REALIGN STDCALL BOOL grLfbLock(GrLock_t type, GrBuffer_t buffer, GrLfbWriteMode_
 REALIGN STDCALL BOOL grLfbUnlock(GrLock_t type, GrBuffer_t buffer)
 {
 	//TODO Remove this
-	free(g_lfb);
+	lowMemFree(g_lfb);
 	g_lfb = NULL;
 	return true;
 }
@@ -1137,7 +1138,7 @@ REALIGN STDCALL void grTexDownloadMipMap(GrChipID_t tmu, uint32_t startAddress, 
 	ti->fmt = info->format;
 	ti->size = 256 >> info->largeLod;
 
-	uint16_t *dataIn  = (uint16_t *)info->data;
+	uint16_t *dataIn  = (uint16_t *)GAME_PTR(info->data);
 	uint16_t *dataOut = (uint16_t *)ti->data;
 
 	drawTriangles();

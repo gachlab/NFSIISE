@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 #include "Wrapper.h"
+#include "LowMem.h"
+#include "GameVarargs.h"
 #include "Version"
 #include <SDL2/SDL.h>
 #include <signal.h>
@@ -687,6 +689,10 @@ REALIGN int32_t SDL_NumJoysticks_wrap(void)
 int main(int argc, char *argv[])
 {
 	void nfs2seEntrypoint();
+	/* Before anything allocates: the game's first allocation is its own stack,
+	 * and it must come from below 2 GiB. Doing it here rather than lazily also
+	 * avoids racing the game's threads over the arena's creation. */
+	lowMemInit();
 	nfs2seEntrypoint();
 	return 0;
 }
@@ -706,9 +712,14 @@ REALIGN void SDL_Delay_wrap(uint32_t ms)
 	SDL_Delay(ms);
 }
 
-REALIGN int32_t vsprintf_wrap(char *s, const char *fmt, va_list arg)
+/*
+ * The game hands us a pointer to its own stack, not a host va_list. That is the
+ * same thing on a 32-bit build and very much not on a 64-bit one, so the
+ * argument is taken as an opaque block and decoded in GameVarargs.c.
+ */
+REALIGN int32_t vsprintf_wrap(char *s, const char *fmt, void *arg)
 {
-	return vsprintf(s, fmt, arg);
+	return gameVsprintf(s, fmt, arg);
 }
 REALIGN int32_t fscanf_wrap(FILE *f, const char *fmt, ...)
 {
@@ -723,17 +734,22 @@ REALIGN int32_t fclose_wrap(FILE *f)
 {
 	return fclose(f);
 }
+/*
+ * The game's entire heap flows through these three. On a 64-bit build they must
+ * return addresses below 2 GiB, because the translated code stores whatever it
+ * gets back in an int32_t. See LowMem.h.
+ */
 REALIGN void *calloc_wrap(size_t num, size_t size)
 {
-	return calloc(num, size);
+	return lowMemCalloc(num, size);
 }
 REALIGN void *malloc_wrap(size_t num)
 {
-	return malloc(num);
+	return lowMemAlloc(num);
 }
 REALIGN void free_wrap(void *ptr)
 {
-	free(ptr);
+	lowMemFree(ptr);
 }
 REALIGN time_t time_wrap(time_t *timer)
 {

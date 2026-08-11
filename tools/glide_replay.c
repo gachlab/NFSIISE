@@ -160,7 +160,7 @@ static void downloadTexture(uint32_t address, GrLOD_t largeLod, GrTextureFormat_
 	info.largeLod = largeLod;
 	info.aspectRatio = GR_ASPECT_1x1;
 	info.format = format;
-	info.data = data;
+	info.data = GAME_ADDR(data);
 	grTexDownloadMipMap(GR_TMU0, address, 0, &info);
 }
 

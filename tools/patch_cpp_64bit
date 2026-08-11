@@ -1,0 +1,239 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""
+Applies the 64-bit changes to the translated game in src/Cpp/NFS2SE.cpp.
+
+src/Cpp is a submodule pointing at upstream NFSIISE-CPP, so the changes live
+here as a patch script rather than as edits in this repository's history. It is
+idempotent: running it twice is harmless, and `--check` only reports.
+
+There are exactly three changes, which is the whole point -- see LowMem.h for
+why so little is needed.
+
+  1. The __WORDSIZE guard, which hard-errors on anything but a 32-bit build.
+  2. push32's size assertion. A handful of call sites push a real pointer,
+     which is 4 bytes on a 32-bit build and 8 on a 64-bit one.
+  3. The only two allocations in 249k lines -- the CPU's simulated stack and
+     the Game context -- which must come from below 2 GiB.
+
+Everything else survives untouched: the ~2286 pointer-to-int32 truncations the
+compiler complains about are exactly the ones that are correct provided every
+address the game can see fits in 32 bits, which is what LowMem and -no-pie
+between them guarantee.
+"""
+
+import sys
+import os
+import re
+
+CPP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "Cpp", "NFS2SE.cpp")
+
+CHANGES = [
+    (
+        "WORDSIZE guard",
+        '''#if !defined(__WORDSIZE) || (__WORDSIZE != 32)
+\t#error "This game is compatible only with 32-bit CPUs!"
+#endif''',
+        '''#if !defined(__WORDSIZE)
+\t#error "__WORDSIZE is not defined!"
+#endif
+#if (__WORDSIZE != 32)
+/*
+ * 64-bit build. The game stores real addresses in int32_t slots, so this is
+ * only sound while every address it can observe fits in 32 bits. That is what
+ * -no-pie (code and static data low) and LowMem.h (everything heap-allocated
+ * low) exist to guarantee. Build with -fpermissive: the truncations the
+ * compiler flags are the intended ones.
+ */
+extern "C" void *lowMemAlloc(unsigned long size);
+extern "C" void lowMemFree(void *ptr);
+#else
+#define lowMemAlloc malloc
+#define lowMemFree free
+#endif
+
+/*
+ * An address stored in the game's static data. The game indexes its pointer
+ * tables at a 4-byte stride (`to32i(off_421560 + eax * 4)`), so these fields
+ * must stay 4 bytes wide no matter what the host's pointer size is -- widening
+ * them would both break that indexing and shift the layout of everything after
+ * them in _data. NFS_GA truncates in the static initialisers, which the linker
+ * resolves as ordinary 32-bit relocations because the build is -no-pie and all
+ * of _data sits below 2 GiB.
+ *
+ * On a 32-bit build this is exactly what void * already was, so it changes
+ * nothing there.
+ */
+typedef uint32_t GameAddr32;
+#define NFS_GA(p) ((GameAddr32)(uintptr_t)(p))''',
+    ),
+    (
+        "push32 size assertion",
+        '''\ttemplate<typename T>
+\tFnInl(void) push32(const T val)
+\t{
+\t\tASSERT_SIZE(4, val);
+\t\tesp -= 4;
+\t\tto32i(esp) = (int32_t)val;
+\t}''',
+        '''\ttemplate<typename T>
+\tFnInl(void) push32(const T val)
+\t{
+\t\t/*
+\t\t * A few call sites push a real pointer rather than a 4-byte value, which
+\t\t * only matches this assertion on a 32-bit build. Truncate explicitly
+\t\t * instead; it is lossless because the address is below 2 GiB.
+\t\t */
+\t\tstatic_assert(sizeof(val) == 4 || is_pointer<T>::value,
+\t\t\t"push32 takes a 4-byte value or a pointer");
+\t\tesp -= 4;
+\t\tto32i(esp) = (int32_t)(intptr_t)val;
+\t}''',
+    ),
+    (
+        "CPU stack allocation",
+        "\t\tstack = (uint8_t *)malloc(stack_size);",
+        "\t\tstack = (uint8_t *)lowMemAlloc(stack_size);",
+    ),
+    (
+        "CPU stack release",
+        "\t\tfree(stack);",
+        "\t\tlowMemFree(stack);",
+    ),
+    (
+        "Game context allocation",
+        "\tGame *new_game_ctx = (Game *)malloc(sizeof(Game));",
+        "\tGame *new_game_ctx = (Game *)lowMemAlloc(sizeof(Game));",
+    ),
+    (
+        "entry point Game contexts",
+        '''extern "C" void nfs2seEntrypoint()
+{
+\tGame game, audio;
+\tmain_game_thread = &game;
+\taudio_game_thread = &audio;
+\tgame._start();
+}''',
+        '''extern "C" void nfs2seEntrypoint()
+{
+\t/*
+\t * These cannot be locals on a 64-bit build. The translation hands the
+\t * context to the wrapper as `(int32_t)this` -- six call sites do it, e.g.
+\t * DirectInputCreateA_wrap -- which is lossless when a pointer is 4 bytes
+\t * and throws away the upper half when it is 8. The real thread stack lives
+\t * around 0x7fff..., so a local arrives as a truncated address that faults
+\t * the moment the wrapper calls back into the game through it.
+\t *
+\t * Allocating them below 2 GiB makes that truncation lossless again, which
+\t * is the same bargain the rest of the port makes. Deliberately never freed:
+\t * they live for the whole process and the game exits through exit().
+\t */
+\tGame *game = new (lowMemAlloc(sizeof(Game))) Game();
+\tGame *audio = new (lowMemAlloc(sizeof(Game))) Game();
+\tmain_game_thread = game;
+\taudio_game_thread = audio;
+\tgame->_start();
+}''',
+    ),
+]
+
+
+# A generated field declaration inside the _data / _bss structs, e.g.
+#   \tstruct packed {int32_t x00[4];void *x10[8];} off_409E10;
+# The shapes vary a lot (146 pure pointer fields, the rest mixed with ints), so
+# matching the line rather than each shape is what keeps this tractable.
+FIELD_LINE = re.compile(r'^\s*struct packed \{.*\}\s*\w+;\s*$')
+
+# The cast used throughout the _data initialiser: (void *)(dword_4E2718)
+INIT_CAST = re.compile(r'\(void \*\)\(')
+
+
+def convert_pointer_fields(source):
+    """Narrow every pointer in the game's static data to 4 bytes.
+
+    Two edits that have to agree with each other: the field declarations, and
+    the initialiser that fills them in. Returns (source, fields, casts).
+    """
+    lines = source.split("\n")
+    fields = 0
+
+    for i, line in enumerate(lines):
+        if "void *" in line and FIELD_LINE.match(line):
+            lines[i] = line.replace("void *", "GameAddr32 ")
+            fields += 1
+
+    source = "\n".join(lines)
+
+    source, casts = INIT_CAST.subn("NFS_GA(", source)
+
+    # Null entries in those same tables are written as a bare `nullptr`, which
+    # no longer converts now that the fields are an integer type. Scope this to
+    # the _data initialiser so genuine pointer uses elsewhere are left alone.
+    start = source.find("} static _data")
+    if start != -1:
+        end = source.find("\n};", start)
+        if end != -1:
+            block = source[start:end].replace("nullptr", "0")
+            source = source[:start] + block + source[end:]
+
+    return source, fields, casts
+
+
+def main():
+    check_only = "--check" in sys.argv
+
+    if not os.path.exists(CPP):
+        print("src/Cpp/NFS2SE.cpp not found. Run: git submodule update --init --recursive",
+              file=sys.stderr)
+        return 1
+
+    with open(CPP, encoding="utf-8") as handle:
+        source = handle.read()
+
+    applied, already, missing = [], [], []
+
+    for name, old, new in CHANGES:
+        if new in source:
+            already.append(name)
+        elif old in source:
+            source = source.replace(old, new, 1)
+            applied.append(name)
+        else:
+            missing.append(name)
+
+    for name in already:
+        print(f"  already patched: {name}")
+    for name in applied:
+        print(f"  patched:         {name}")
+    for name in missing:
+        print(f"  NOT FOUND:       {name}", file=sys.stderr)
+
+    if missing:
+        print("\nsrc/Cpp/NFS2SE.cpp does not look like the expected revision.", file=sys.stderr)
+        return 1
+
+    # Ask the state of the file itself rather than looking for a marker string:
+    # the WORDSIZE replacement above defines NFS_GA, so its presence says
+    # nothing about whether the tables have been narrowed yet.
+    source, fields, casts = convert_pointer_fields(source)
+    if fields or casts:
+        print(f"  patched:         static pointer tables ({fields} fields, {casts} initialisers)")
+        applied.append("static pointer tables")
+    else:
+        print("  already patched: static pointer tables")
+
+    if check_only:
+        print("\nUp to date." if not applied else "\nWould apply the changes above.")
+        return 0
+
+    if applied:
+        with open(CPP, "w", encoding="utf-8") as handle:
+            handle.write(source)
+        print("\nWrote src/Cpp/NFS2SE.cpp.")
+    else:
+        print("\nNothing to do.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

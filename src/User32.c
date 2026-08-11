@@ -278,8 +278,11 @@ REALIGN STDCALL BOOL GetMessageA_wrap(MSG *msg, void *hWnd, uint32_t wMsgFilterM
 						msg->uMsg = WM_KEYDOWN;
 						if (isWMChar)
 						{
-							event2.user.data1 = (void *)msg->wParam;
-							event2.user.data2 = (void *)msg->lParam;
+							/* wParam/lParam are 32-bit values making a round
+							 * trip through SDL's void * user fields -- not
+							 * pointers, so nothing is lost either way. */
+							event2.user.data1 = (void *)(uintptr_t)msg->wParam;
+							event2.user.data2 = (void *)(uintptr_t)msg->lParam;
 							SDL_PushEvent(&event2);
 						}
 					}
@@ -295,8 +298,8 @@ REALIGN STDCALL BOOL GetMessageA_wrap(MSG *msg, void *hWnd, uint32_t wMsgFilterM
 				} break;
 				case WM_CHR_SDL:
 					msg->uMsg = WM_CHAR;
-					msg->wParam = (uint32_t)event.user.data1;
-					msg->lParam = (uint32_t)event.user.data2;
+					msg->wParam = (uint32_t)(uintptr_t)event.user.data1;
+					msg->lParam = (uint32_t)(uintptr_t)event.user.data2;
 					break;
 				case SDL_FINGERDOWN:
 				{

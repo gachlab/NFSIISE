@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+#
+# SPDX-License-Identifier: MIT
+#
+# Fast rebuild for wrapper-only changes.
+#
+# compile_nfs rebuilds everything, and the translated game is a single 249k-line
+# C++ file that takes minutes to compile -- unbearable when the edit was one line
+# in Kernel32.c. The translation only changes when tools/patch_cpp_64bit runs, so
+# its object file is cached here and reused, turning a ~10 minute iteration into
+# a few seconds.
+#
+# Usage: ./tools/rebuild_wrapper [vulkan|gl1|gl2] [debug]
+#
+# Run compile_nfs cpp64 at least once first (or after editing the translation)
+# to produce the cached object.
+
+set -e
+
+cd "$(dirname "$0")/.."
+
+BACKEND=${1:-vulkan}
+BUILD_TYPE=${2:-debug}
+set -- "$1" "$BUILD_TYPE"
+
+# Keyed on the build type as well as the source: a cache that ignored the flags
+# would happily link a -O0 translation into a release build and quietly hand
+# back something several times slower.
+CACHE="build/NFS2SE.cpp64.$2.o"
+STAMP="build/NFS2SE.cpp64.$2.stamp"
+
+case "$BACKEND" in
+	vulkan) GFX_DEFINE="-DVULKAN"; GFX_LIBS="-lvulkan" ;;
+	gl1)    GFX_DEFINE="-DOPENGL1X"; GFX_LIBS="-lGL" ;;
+	gl2)    GFX_DEFINE=""; GFX_LIBS="-lGL" ;;
+	*) echo "Unknown backend: $BACKEND" >&2; exit 1 ;;
+esac
+
+if [ "$BUILD_TYPE" == "debug" ]; then
+	FLAGS="-O0 -g -fno-strict-aliasing"
+else
+	FLAGS="-O3 -DNDEBUG -fno-strict-aliasing"
+fi
+
+CPU_FLAGS="-no-pie -fno-pie"
+CXX=${CXX:-g++}
+CC=${CC:-gcc}
+
+mkdir -p build
+
+# The cache is keyed on the translation's contents, so editing it (or running
+# the patch script) correctly forces a full recompile rather than silently
+# linking a stale object.
+CURRENT=$(cksum src/Cpp/NFS2SE.cpp | awk '{print $1, $2}')
+CACHED=$(cat "$STAMP" 2>/dev/null || true)
+
+if [ ! -f "$CACHE" ] || [ "$CURRENT" != "$CACHED" ]; then
+	echo -n "Translated game changed -- recompiling it (slow, once)... "
+	$CXX -c -std=c++14 $CPU_FLAGS $FLAGS -fpermissive -w \
+		-Wno-c++11-narrowing src/Cpp/NFS2SE.cpp -fno-rtti -fno-exceptions \
+		-o "$CACHE" || exit 1
+	echo "$CURRENT" > "$STAMP"
+	echo "OK!"
+else
+	echo "Reusing cached translation object."
+fi
+
+echo -n "Compiling wrapper... "
+rm -f build/wrapper/*.o
+mkdir -p build/wrapper
+for f in src/*.c; do
+	$CC -c -std=gnu89 -Wno-incompatible-function-pointer-types -Wno-int-conversion \
+		-Wall $CPU_FLAGS $FLAGS $GFX_DEFINE -DNFS_CPP -Isrc \
+		"$f" -o "build/wrapper/$(basename "${f%.c}").o" || exit 1
+done
+echo "OK!"
+
+echo -n "Linking... "
+$CXX -o "Need For Speed II SE/nfs2se" $CPU_FLAGS \
+	"$CACHE" build/wrapper/*.o -lSDL2 $GFX_LIBS -lm -lpthread || exit 1
+echo "OK!"
