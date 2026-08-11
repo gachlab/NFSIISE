@@ -237,8 +237,10 @@ static int threadFunction(void *data)
 
 /**/
 
-REALIGN STDCALL void *CreateThread_wrap(void *threadAttributes, uint32_t stackSize, THREAD_START_ROUTINE startAddress, void *parameter, uint32_t creationFlags, uint32_t *threadId)
+REALIGN STDCALL GameAddr CreateThread_wrap(GameAddr threadAttributes, uint32_t stackSize, THREAD_START_ROUTINE startAddress, GameAddr parameterAddr, uint32_t creationFlags, GameAddr threadIdAddr)
 {
+	void *parameter = GAME_PTR(parameterAddr);
+	uint32_t *threadId = (uint32_t *)GAME_PTR(threadIdAddr);
 	Thread *thread = (Thread *)lowMemAlloc(sizeof(Thread));
 	thread->handleType = HandleThread;
 #ifdef NFS_CPP
@@ -252,49 +254,57 @@ REALIGN STDCALL void *CreateThread_wrap(void *threadAttributes, uint32_t stackSi
 	if (threadId)
 		*threadId = SDL_GetThreadID(sdl_thread);
 	SDL_DetachThread(sdl_thread);
-	return thread;
+	return GAME_ADDR(thread);
 }
-REALIGN STDCALL uint32_t ResumeThread_wrap(Thread *thread)
+REALIGN STDCALL uint32_t ResumeThread_wrap(GameAddr threadAddr)
 {
+	Thread *thread = (Thread *)GAME_PTR(threadAddr);
 	SDL_SemPost(thread->sem);
 	return 0;
 }
-REALIGN STDCALL BOOL SetThreadPriority_wrap(Thread *thread, int priority)
+REALIGN STDCALL BOOL SetThreadPriority_wrap(GameAddr threadAddr, int priority)
 {
+	Thread *thread = (Thread *)GAME_PTR(threadAddr);
 	return false;
 }
 REALIGN STDCALL uint32_t GetCurrentThreadId_wrap(void)
 {
 	return SDL_ThreadID();
 }
-REALIGN STDCALL void *GetCurrentThread_wrap(void)
+REALIGN STDCALL GameAddr GetCurrentThread_wrap(void)
 {
-	return NULL;
+	return 0;
 }
-REALIGN STDCALL BOOL TerminateThread_wrap(Thread *thread, uint32_t exitCode)
+REALIGN STDCALL BOOL TerminateThread_wrap(GameAddr threadAddr, uint32_t exitCode)
 {
+	Thread *thread = (Thread *)GAME_PTR(threadAddr);
 	return false;
 }
-REALIGN STDCALL void InitializeCriticalSection_wrap(CRITICAL_SECTION *criticalSection)
+REALIGN STDCALL void InitializeCriticalSection_wrap(GameAddr criticalSectionAddr)
 {
+	CRITICAL_SECTION *criticalSection = (CRITICAL_SECTION *)GAME_PTR(criticalSectionAddr);
 	criticalSection->mutex = (uint64_t)(uintptr_t)SDL_CreateMutex();
 }
-REALIGN STDCALL void EnterCriticalSection_wrap(CRITICAL_SECTION *criticalSection)
+REALIGN STDCALL void EnterCriticalSection_wrap(GameAddr criticalSectionAddr)
 {
+	CRITICAL_SECTION *criticalSection = (CRITICAL_SECTION *)GAME_PTR(criticalSectionAddr);
 	SDL_LockMutex((SDL_mutex *)(uintptr_t)criticalSection->mutex);
 }
-REALIGN STDCALL void LeaveCriticalSection_wrap(CRITICAL_SECTION *criticalSection)
+REALIGN STDCALL void LeaveCriticalSection_wrap(GameAddr criticalSectionAddr)
 {
+	CRITICAL_SECTION *criticalSection = (CRITICAL_SECTION *)GAME_PTR(criticalSectionAddr);
 	SDL_UnlockMutex((SDL_mutex *)(uintptr_t)criticalSection->mutex);
 }
-REALIGN STDCALL void DeleteCriticalSection_wrap(CRITICAL_SECTION *criticalSection)
+REALIGN STDCALL void DeleteCriticalSection_wrap(GameAddr criticalSectionAddr)
 {
+	CRITICAL_SECTION *criticalSection = (CRITICAL_SECTION *)GAME_PTR(criticalSectionAddr);
 	SDL_DestroyMutex((SDL_mutex *)(uintptr_t)criticalSection->mutex);
 	criticalSection->mutex = 0;
 }
 
-REALIGN STDCALL void GlobalMemoryStatus_wrap(MEMORYSTATUS *memoryStatus)
+REALIGN STDCALL void GlobalMemoryStatus_wrap(GameAddr memoryStatusAddr)
 {
+	MEMORYSTATUS *memoryStatus = (MEMORYSTATUS *)GAME_PTR(memoryStatusAddr);
 	memset(memoryStatus, 0, sizeof(MEMORYSTATUS));
 	memoryStatus->length = sizeof(MEMORYSTATUS);
 	memoryStatus->memoryLoad = 0;
@@ -327,16 +337,17 @@ REALIGN STDCALL uint32_t GetLastError_wrap(void)
 	return 0;
 }
 
-REALIGN STDCALL Event *CreateEventA_wrap(SECURITY_ATTRIBUTES *eventAttributes, BOOL manualReset, BOOL initialState, const char *name)
+REALIGN STDCALL GameAddr CreateEventA_wrap(GameAddr eventAttributes, BOOL manualReset, BOOL initialState, GameAddr name)
 {
 	Event *event = (Event *)lowMemAlloc(sizeof(Event));
 	event->handleType = HandleEvent;
 	event->manualReset = manualReset;
 	event->is_set = initialState;
-	return event;
+	return GAME_ADDR(event);
 }
-REALIGN STDCALL BOOL SetEvent_wrap(Event *event)
+REALIGN STDCALL BOOL SetEvent_wrap(GameAddr eventAddr)
 {
+	Event *event = (Event *)GAME_PTR(eventAddr);
 	if (event)
 	{
 		SDL_LockMutex(event_mutex);
@@ -421,7 +432,7 @@ static int serialPortThread(void *data)
 				break;
 			}
 		}
-		SetEvent_wrap((Event *)GAME_PTR(file->readOverlapped->hEvent));
+		SetEvent_wrap(file->readOverlapped->hEvent);
 		if (!file->pending)
 		{
 			SDL_UnlockMutex(file->mutex);
@@ -432,8 +443,9 @@ static int serialPortThread(void *data)
 	return 0;
 }
 
-REALIGN STDCALL File *CreateFileA_wrap(const char *fileName, uint32_t desiredAccess, uint32_t shareMode, SECURITY_ATTRIBUTES *securityAttributes, uint32_t creationDisposition, uint32_t flagsAndAttributes, void *templateFile)
+REALIGN STDCALL GameAddr CreateFileA_wrap(GameAddr fileNameAddr, uint32_t desiredAccess, uint32_t shareMode, GameAddr securityAttributes, uint32_t creationDisposition, uint32_t flagsAndAttributes, GameAddr templateFile)
 {
+	const char *fileName = (const char *)GAME_PTR(fileNameAddr);
 	uint32_t COM_number = 0;
 	if (!strncasecmp(fileName, "\\\\.\\com", 7))
 		COM_number = fileName[7] - '0';
@@ -465,26 +477,30 @@ REALIGN STDCALL File *CreateFileA_wrap(const char *fileName, uint32_t desiredAcc
 
 	free(tmpFileName);
 
-	return file ? file : (File *)-1;
+	return file ? GAME_ADDR(file) : (GameAddr)-1;
 }
-REALIGN STDCALL uint32_t GetFileSize_wrap(File *file, uint32_t *fileSizeHigh)
+REALIGN STDCALL uint32_t GetFileSize_wrap(GameAddr fileAddr, GameAddr fileSizeHighAddr)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
+	uint32_t *fileSizeHigh = (uint32_t *)GAME_PTR(fileSizeHighAddr);
 	struct stat stat;
 	if (!fstat(file->fd, &stat))
 		return stat.st_size;
 	return -1;
 }
-REALIGN STDCALL FileMapping *CreateFileMappingA_wrap(File *file, SECURITY_ATTRIBUTES *fileMappingAttributes, uint32_t protect, uint32_t maximumSizeHigh, uint32_t maximumSizeLow, const char *name)
+REALIGN STDCALL GameAddr CreateFileMappingA_wrap(GameAddr fileAddr, GameAddr fileMappingAttributes, uint32_t protect, uint32_t maximumSizeHigh, uint32_t maximumSizeLow, GameAddr name)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
 	FileMapping *fileMapping = (FileMapping *)lowMemAlloc(sizeof(FileMapping));
 	fileMapping->handleType = HandleFileMapping;
 	fileMapping->fd = file->fd;
-	return fileMapping;
+	return GAME_ADDR(fileMapping);
 }
-REALIGN STDCALL void *MapViewOfFile_wrap(FileMapping *fMapping, uint32_t desiredAccess, uint32_t fileOffsetHigh, uint32_t fileOffsetLow, uint32_t numberOfBytesToMap)
+REALIGN STDCALL GameAddr MapViewOfFile_wrap(GameAddr fMappingAddr, uint32_t desiredAccess, uint32_t fileOffsetHigh, uint32_t fileOffsetLow, uint32_t numberOfBytesToMap)
 {
+	FileMapping *fMapping = (FileMapping *)GAME_PTR(fMappingAddr);
 	//Cannot use mmap() because UnmapViewOfFile doesn't provide the size. I don't want to use an array for sizes. This is also OK.
-	uint32_t size = GetFileSize_wrap((File *)fMapping, NULL);
+	uint32_t size = GetFileSize_wrap(GAME_ADDR(fMapping), 0);
 	void *fileMap = NULL;
 	if (size > 0)
 	{
@@ -494,19 +510,23 @@ REALIGN STDCALL void *MapViewOfFile_wrap(FileMapping *fMapping, uint32_t desired
 		read(fMapping->fd, fileMap, size);
 		lseek(fMapping->fd, pos, SEEK_SET);
 	}
-	return fileMap;
+	return GAME_ADDR(fileMap);
 }
-REALIGN STDCALL BOOL UnmapViewOfFile_wrap(const void *lpBaseAddress)
+REALIGN STDCALL BOOL UnmapViewOfFile_wrap(GameAddr lpBaseAddress)
 {
 	lowMemFree((void *)lpBaseAddress);
 	return true;
 }
-REALIGN STDCALL BOOL FlusfileBuffers_wrap(File *file)
+REALIGN STDCALL BOOL FlusfileBuffers_wrap(GameAddr fileAddr)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
 	return !fsync(file->fd);
 }
-REALIGN STDCALL BOOL GetOverlappedResult_wrap(File *file, OVERLAPPED *overlapped, uint32_t *lpNumberOfBytesTransferred, BOOL bWait)
+REALIGN STDCALL BOOL GetOverlappedResult_wrap(GameAddr fileAddr, GameAddr overlappedAddr, GameAddr lpNumberOfBytesTransferredAddr, BOOL bWait)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
+	OVERLAPPED *overlapped = (OVERLAPPED *)GAME_PTR(overlappedAddr);
+	uint32_t *lpNumberOfBytesTransferred = (uint32_t *)GAME_PTR(lpNumberOfBytesTransferredAddr);
 	SDL_LockMutex(file->mutex);
 	if (file->readOverlapped == overlapped)
 	{
@@ -519,16 +539,23 @@ REALIGN STDCALL BOOL GetOverlappedResult_wrap(File *file, OVERLAPPED *overlapped
 	SDL_UnlockMutex(file->mutex);
 	return false;
 }
-REALIGN STDCALL BOOL SetEndOfFile_wrap(File *file)
+REALIGN STDCALL BOOL SetEndOfFile_wrap(GameAddr fileAddr)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
 	return !lseek(file->fd, 0, SEEK_END);
 }
-REALIGN STDCALL uint32_t SetFilePointer_wrap(File *file, uint32_t distanceToMove, uint32_t *distanceToMoveHigh, uint32_t moveMethod)
+REALIGN STDCALL uint32_t SetFilePointer_wrap(GameAddr fileAddr, uint32_t distanceToMove, GameAddr distanceToMoveHighAddr, uint32_t moveMethod)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
+	uint32_t *distanceToMoveHigh = (uint32_t *)GAME_PTR(distanceToMoveHighAddr);
 	return lseek(file->fd, distanceToMove, moveMethod);
 }
-REALIGN STDCALL BOOL WriteFile_wrap(File *file, const void *buffer, uint32_t numberOfBytesToWrite, uint32_t *numberOfBytesWritten, OVERLAPPED *overlapped)
+REALIGN STDCALL BOOL WriteFile_wrap(GameAddr fileAddr, GameAddr bufferAddr, uint32_t numberOfBytesToWrite, GameAddr numberOfBytesWrittenAddr, GameAddr overlappedAddr)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
+	const void *buffer = GAME_PTR(bufferAddr);
+	uint32_t *numberOfBytesWritten = (uint32_t *)GAME_PTR(numberOfBytesWrittenAddr);
+	OVERLAPPED *overlapped = (OVERLAPPED *)GAME_PTR(overlappedAddr);
 	BOOL hasEvent = file->async && overlapped && overlapped->hEvent, ret;
 	if (hasEvent)
 	{
@@ -541,12 +568,16 @@ REALIGN STDCALL BOOL WriteFile_wrap(File *file, const void *buffer, uint32_t num
 	if (hasEvent && ret)
 	{
 		tcdrain(file->fd);
-		SetEvent_wrap((Event *)GAME_PTR(overlapped->hEvent));
+		SetEvent_wrap(overlapped->hEvent);
 	}
 	return ret;
 }
-REALIGN STDCALL BOOL ReadFile_wrap(File *file, void *buffer, uint32_t numberOfBytesToRead, uint32_t *numberOfBytesRead, OVERLAPPED *overlapped)
+REALIGN STDCALL BOOL ReadFile_wrap(GameAddr fileAddr, GameAddr bufferAddr, uint32_t numberOfBytesToRead, GameAddr numberOfBytesReadAddr, GameAddr overlappedAddr)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
+	void *buffer = GAME_PTR(bufferAddr);
+	uint32_t *numberOfBytesRead = (uint32_t *)GAME_PTR(numberOfBytesReadAddr);
+	OVERLAPPED *overlapped = (OVERLAPPED *)GAME_PTR(overlappedAddr);
 	if (file->async)
 	{
 		if (overlapped && overlapped->hEvent)
@@ -577,20 +608,25 @@ REALIGN STDCALL BOOL ReadFile_wrap(File *file, void *buffer, uint32_t numberOfBy
 	*numberOfBytesRead = read(file->fd, buffer, numberOfBytesToRead);
 	return *numberOfBytesRead == numberOfBytesToRead;
 }
-REALIGN STDCALL BOOL GetCommState_wrap(File *file, DCB *dcb)
+REALIGN STDCALL BOOL GetCommState_wrap(GameAddr fileAddr, GameAddr dcbAddr)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
+	DCB *dcb = (DCB *)GAME_PTR(dcbAddr);
 	return true;
 }
-REALIGN STDCALL BOOL PurgeComm_wrap(File *file, uint32_t flags)
+REALIGN STDCALL BOOL PurgeComm_wrap(GameAddr fileAddr, uint32_t flags)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
 	if (flags & 0x5)
 		tcflush(file->fd, TCOFLUSH);
 	if (flags & 0xA)
 		tcflush(file->fd, TCIFLUSH);
 	return true;
 }
-REALIGN STDCALL BOOL SetCommState_wrap(File *file, DCB *dcb)
+REALIGN STDCALL BOOL SetCommState_wrap(GameAddr fileAddr, GameAddr dcbAddr)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
+	DCB *dcb = (DCB *)GAME_PTR(dcbAddr);
 	struct termios tty;
 	memset(&tty, 0, sizeof(struct termios));
 	cfsetospeed(&tty, B9600);
@@ -599,26 +635,30 @@ REALIGN STDCALL BOOL SetCommState_wrap(File *file, DCB *dcb)
 	tty.c_cflag |= CS8 | CLOCAL | CREAD;
 	return !tcsetattr(file->fd, TCSANOW, &tty);
 }
-REALIGN STDCALL BOOL SetCommTimeouts_wrap(File *file, COMMTIMEOUTS *commTimeouts)
+REALIGN STDCALL BOOL SetCommTimeouts_wrap(GameAddr fileAddr, GameAddr commTimeoutsAddr)
 {
+	File *file = (File *)GAME_PTR(fileAddr);
+	COMMTIMEOUTS *commTimeouts = (COMMTIMEOUTS *)GAME_PTR(commTimeoutsAddr);
 	file->us_timeout = commTimeouts->ReadTotalTimeoutConstant * 1000;
 	return true;
 }
 
-REALIGN STDCALL BOOL DeleteFileA_wrap(const char *fileName)
+REALIGN STDCALL BOOL DeleteFileA_wrap(GameAddr fileNameAddr)
 {
+	const char *fileName = (const char *)GAME_PTR(fileNameAddr);
 	char *tmpFileName = convertFilePath(fileName, true);
 	BOOL ret = !unlink(tmpFileName);
 	free(tmpFileName);
 	return ret;
 }
 
-REALIGN STDCALL void *GetModuleHandleA_wrap(const char *moduleName)
+REALIGN STDCALL GameAddr GetModuleHandleA_wrap(GameAddr moduleName)
 {
-	return NULL;
+	return 0;
 }
-REALIGN STDCALL BOOL CloseHandle_wrap(void *handle)
+REALIGN STDCALL BOOL CloseHandle_wrap(GameAddr handleAddr)
 {
+	void *handle = GAME_PTR(handleAddr);
 	if (!handle)
 		return false;
 	switch (*(HandleType *)handle)
@@ -657,39 +697,45 @@ REALIGN STDCALL BOOL CloseHandle_wrap(void *handle)
 	return false;
 }
 
-REALIGN STDCALL BOOL DuplicateHandle_wrap(void *hSourceProcessHandle, void *hSourceHandle, void *hTargetProcessHandle, void **lpTargetHandle, uint32_t desiredAccess, BOOL bInheritHandle, uint32_t dwOptions)
+REALIGN STDCALL BOOL DuplicateHandle_wrap(GameAddr hSourceProcessHandle, GameAddr hSourceHandle, GameAddr hTargetProcessHandle, GameAddr lpTargetHandleAddr, uint32_t desiredAccess, BOOL bInheritHandle, uint32_t dwOptions)
 {
-	*lpTargetHandle = NULL;
+	GameAddr *lpTargetHandle = (GameAddr *)GAME_PTR(lpTargetHandleAddr);
+	*lpTargetHandle = 0;
 	return false;
 }
 
-REALIGN STDCALL void *GetCurrentProcess_wrap(void)
+REALIGN STDCALL GameAddr GetCurrentProcess_wrap(void)
 {
-	return NULL;
+	return 0;
 }
 
-REALIGN STDCALL void GetSystemInfo_wrap(SYSTEM_INFO *systemInfo)
+REALIGN STDCALL void GetSystemInfo_wrap(GameAddr systemInfoAddr)
 {
+	SYSTEM_INFO *systemInfo = (SYSTEM_INFO *)GAME_PTR(systemInfoAddr);
 	memset(systemInfo, 0, sizeof(SYSTEM_INFO));
 	systemInfo->pageSize = getpagesize();
 }
 
-REALIGN STDCALL uint32_t GetCurrentDirectoryA_wrap(uint32_t bufferLength, char *buffer)
+REALIGN STDCALL uint32_t GetCurrentDirectoryA_wrap(uint32_t bufferLength, GameAddr bufferAddr)
 {
+	char *buffer = (char *)GAME_PTR(bufferAddr);
 	if (getcwd(buffer, bufferLength))
 		return bufferLength;
 	return 0;
 }
-REALIGN STDCALL BOOL SetCurrentDirectoryA_wrap(const char *pathName)
+REALIGN STDCALL BOOL SetCurrentDirectoryA_wrap(GameAddr pathNameAddr)
 {
+	const char *pathName = (const char *)GAME_PTR(pathNameAddr);
 	char *tmpPathName = convertFilePath(pathName, false);
 	BOOL ret = !chdir(tmpPathName);
 	free(tmpPathName);
 	return ret;
 }
 
-REALIGN STDCALL BOOL FindNextFileA_wrap(FindFile *findFile, WIN32_FIND_DATA *findFileData)
+REALIGN STDCALL BOOL FindNextFileA_wrap(GameAddr findFileAddr, GameAddr findFileDataAddr)
 {
+	FindFile *findFile = (FindFile *)GAME_PTR(findFileAddr);
+	WIN32_FIND_DATA *findFileData = (WIN32_FIND_DATA *)GAME_PTR(findFileDataAddr);
 	struct dirent *de;
 	int pos;
 	while ((de = readdir(findFile->dir)))
@@ -704,8 +750,9 @@ REALIGN STDCALL BOOL FindNextFileA_wrap(FindFile *findFile, WIN32_FIND_DATA *fin
 	}
 	return false;
 }
-REALIGN STDCALL BOOL FindClose_wrap(FindFile *findFile)
+REALIGN STDCALL BOOL FindClose_wrap(GameAddr findFileAddr)
 {
+	FindFile *findFile = (FindFile *)GAME_PTR(findFileAddr);
 	if (findFile)
 	{
 		if (findFile->dir)
@@ -716,28 +763,30 @@ REALIGN STDCALL BOOL FindClose_wrap(FindFile *findFile)
 	}
 	return false;
 }
-REALIGN STDCALL FindFile *FindFirstFileA_wrap(const char *fileName, WIN32_FIND_DATA *findFileData)
+REALIGN STDCALL GameAddr FindFirstFileA_wrap(GameAddr fileNameAddr, GameAddr findFileDataAddr)
 {
+	const char *fileName = (const char *)GAME_PTR(fileNameAddr);
+	WIN32_FIND_DATA *findFileData = (WIN32_FIND_DATA *)GAME_PTR(findFileDataAddr);
 	memset(findFileData, 0, sizeof(WIN32_FIND_DATA));
 
 	if (*fileName != '*') //This condition should be always false
-		return (FindFile *)-1;
+		return (GameAddr)-1;
 
 	DIR *dir = opendir(".");
 	if (!dir)
-		return (FindFile *)-1;
+		return (GameAddr)-1;
 
 	FindFile *findFile = (FindFile *)lowMemAlloc(sizeof(FindFile));
 	findFile->dir = dir;
 	findFile->filter = strdup(fileName);
 
-	if (!FindNextFileA_wrap(findFile, findFileData))
+	if (!FindNextFileA_wrap(GAME_ADDR(findFile), GAME_ADDR(findFileData)))
 	{
-		FindClose_wrap(findFile);
-		return (FindFile *)-1;
+		FindClose_wrap(GAME_ADDR(findFile));
+		return (GameAddr)-1;
 	}
 
-	return findFile;
+	return GAME_ADDR(findFile);
 }
 
 #endif
