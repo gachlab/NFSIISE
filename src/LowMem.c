@@ -5,11 +5,20 @@
 #include <stdint.h>
 #include <string.h>
 
+void nfsBadAddr(unsigned long long addr)
+{
+	fprintf(stderr, "NFS: game address %#llx does not fit in 32 bits.\n"
+	                "     A host pointer has reached a slot the game truncates.\n", addr);
+	abort();
+}
+
 /*
- * On a 32-bit build every address already fits in an int32_t, so there is
- * nothing to do and this is a straight pass-through to libc.
+ * The original build runs the real 1997 binary through the assembly
+ * translation, where an address is an address and there is no arena at all.
+ * Only the C++ translation has one, so that -- not the host's word size -- is
+ * what decides whether any of this is needed.
  */
-#if !defined(__LP64__) && !defined(_WIN64)
+#ifndef NFS_CPP
 
 void lowMemInit(void) {}
 void *lowMemAlloc(size_t size) { return malloc(size); }
@@ -21,15 +30,21 @@ BOOL lowMemIsAddressable(const void *ptr) { (void)ptr; return true; }
 #else
 
 #include <pthread.h>
-#include <sys/mman.h>
-#include <unistd.h>
 
 /*
- * Address space reserved below 2 GiB. Only touched pages are ever committed
- * (MAP_NORESERVE), so this costs address space rather than memory. NFS2 SE is
- * a 1997 game that shipped targeting 16 MiB machines, so this is very roomy.
+ * The heap lives inside the game's arena, which the translated game defines
+ * (see tools/patch_cpp_64bit). It has to: every address the game holds is an
+ * offset from the arena's base, so a block handed out from anywhere else has
+ * no offset to be named by.
+ *
+ * This replaces a 256 MiB mmap that had to land below 2 GiB, which is the
+ * requirement that could never be met on arm64 macOS or Android. Ordinary
+ * static storage has no such problem, and being uninitialised it is still
+ * demand-zero -- address space rather than memory.
  */
-#define LOWMEM_ARENA_BYTES (256u * 1024u * 1024u)
+extern unsigned char *const g_nfsHeap;
+extern const unsigned long g_nfsHeapBytes;
+
 #define LOWMEM_ALIGN       16u
 
 /*
@@ -59,69 +74,29 @@ static size_t alignUp(size_t value)
 	return (value + (LOWMEM_ALIGN - 1)) & ~(size_t)(LOWMEM_ALIGN - 1);
 }
 
+/* Non-zero if the pointer is one the game can name, i.e. inside the arena. */
 BOOL lowMemIsAddressable(const void *ptr)
 {
-	return ptr == NULL || (uintptr_t)ptr < 0x80000000u;
+	return ptr == NULL ||
+		((const unsigned char *)ptr >= g_nfsHeap &&
+		 (const unsigned char *)ptr < g_nfsHeap + g_nfsHeapBytes);
 }
 
 void lowMemInit(void)
 {
-	void *mapped;
-
 	if (g_arena)
 		return;
 
-	mapped = MAP_FAILED;
+	/*
+	 * Before anything else: the game's statics have to be in place, because
+	 * the wrapper reads them through exported symbols of its own accord.
+	 */
+	nfsArenaInit();
 
-#ifdef MAP_32BIT
-	/* Linux: exactly what is wanted -- guarantees the first 2 GiB. */
-	mapped = mmap(NULL, LOWMEM_ARENA_BYTES, PROT_READ | PROT_WRITE,
-		MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_32BIT, -1, 0);
-#endif
-
-	if (mapped == MAP_FAILED)
-	{
-		/*
-		 * No MAP_32BIT (macOS, the BSDs). Ask for a low address by hint and
-		 * walk upwards until something takes. On macOS this additionally
-		 * requires the executable to be linked with -pagezero_size 0x1000,
-		 * otherwise the first 4 GiB are reserved by __PAGEZERO and every one
-		 * of these attempts fails.
-		 */
-		uintptr_t hint;
-		for (hint = 0x10000000u; hint < 0x70000000u; hint += 0x10000000u)
-		{
-			mapped = mmap((void *)hint, LOWMEM_ARENA_BYTES, PROT_READ | PROT_WRITE,
-				MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-			if (mapped != MAP_FAILED)
-			{
-				if ((uintptr_t)mapped + LOWMEM_ARENA_BYTES < 0x80000000u)
-					break;
-				munmap(mapped, LOWMEM_ARENA_BYTES);
-				mapped = MAP_FAILED;
-			}
-		}
-	}
-
-	if (mapped == MAP_FAILED)
-	{
-		fprintf(stderr,
-			"LowMem: cannot reserve %u MiB below 2 GiB.\n"
-			"The translated game stores addresses in 32-bit slots, so it cannot run without this.\n",
-			LOWMEM_ARENA_BYTES / (1024u * 1024u));
-		abort();
-	}
-
-	if (!lowMemIsAddressable((uint8_t *)mapped + LOWMEM_ARENA_BYTES - 1))
-	{
-		fprintf(stderr, "LowMem: arena at %p does not fit below 2 GiB.\n", mapped);
-		abort();
-	}
-
-	g_arena = (uint8_t *)mapped;
+	g_arena = g_nfsHeap;
 
 	g_first = (LowBlock *)g_arena;
-	g_first->size = LOWMEM_ARENA_BYTES - sizeof(LowBlock);
+	g_first->size = (size_t)g_nfsHeapBytes - sizeof(LowBlock);
 	g_first->next = NULL;
 	g_first->prev = NULL;
 	g_first->free = 1;

@@ -6,15 +6,13 @@
 #include <stdint.h>
 #include <string.h>
 
-#if !defined(__LP64__) && !defined(_WIN64)
-
-/* 32-bit host: the game's argument block already is a va_list. */
-int32_t gameVsprintf(char *out, const char *fmt, const void *args)
-{
-	return vsprintf(out, fmt, *(va_list *)&args);
-}
-
-#else
+/*
+ * There used to be a shortcut here: on a 32-bit host the game's argument block
+ * is already a va_list, so this was one call to vsprintf. That stopped being
+ * true when a game address stopped being an address -- vsprintf would take the
+ * argument of a %s for a pointer, and it is an offset. The parsing version
+ * below translates them, and now both hosts use it.
+ */
 
 /*
  * The game's arguments are consecutive 4-byte slots, in Win32 cdecl order.
@@ -194,12 +192,12 @@ int32_t gameVsprintf(char *out, const char *fmt, const void *args)
 			case 'p':
 			{
 				/*
-				 * A 32-bit game address. Widening is safe precisely because
-				 * everything the game can reference lives below 2 GiB -- see
+				 * A game address, which is an offset into the arena rather
+				 * than something that can be dereferenced on its own -- see
 				 * LowMem.h. A null is printed the way libc would.
 				 */
 				uint32_t address = nextWord(&reader);
-				const void *pointer = (const void *)(uintptr_t)address;
+				const void *pointer = GAME_PTR(address);
 				if (conversion == 's' && address == 0)
 					pointer = "(null)";
 				if (stars == 2)
@@ -247,5 +245,3 @@ int32_t gameVsprintf(char *out, const char *fmt, const void *args)
 	*cursor = 0;
 	return (int32_t)(cursor - out);
 }
-
-#endif

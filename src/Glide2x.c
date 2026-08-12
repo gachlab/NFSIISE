@@ -92,8 +92,13 @@ static inline void convertColor(GrColor_t color, uint8_t *alpha, float *r, float
 	}
 }
 
-REALIGN STDCALL void grFogTable(const GrFog_t ft[GR_FOG_TABLE_SIZE])
+REALIGN STDCALL void grFogTable(GameAddr ftAddr)
 {
+	/*
+	 * The game passes the address of its own table, not a pointer to it.
+	 * Those were the same thing until a game address became an offset.
+	 */
+	const GrFog_t *ft = (const GrFog_t *)GAME_PTR(ftAddr);
 	/* Copied from OpenGLIDE */
 
 	static const uint32_t intStartEnd[GR_FOG_TABLE_SIZE + 1] =
@@ -123,8 +128,13 @@ REALIGN STDCALL void grFogTable(const GrFog_t ft[GR_FOG_TABLE_SIZE])
 
 // 	printf("grFogTable\n");
 }
-REALIGN STDCALL void guFogGenerateExp(GrFog_t fogtable[GR_FOG_TABLE_SIZE], float density)
+REALIGN STDCALL void guFogGenerateExp(GameAddr fogtableAddr, float density)
 {
+	/*
+	 * The game passes the address of its own table, not a pointer to it.
+	 * Those were the same thing until a game address became an offset.
+	 */
+	GrFog_t *fogtable = (GrFog_t *)GAME_PTR(fogtableAddr);
 	/* Copied from OpenGLIDE */
 
 	static const float tableIndexToW[GR_FOG_TABLE_SIZE] =

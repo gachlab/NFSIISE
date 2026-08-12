@@ -15,6 +15,7 @@
 set -e
 
 cd "$(dirname "$0")/.."
+. tools/lib/game_driver.sh
 
 MEASURE_SECONDS=${1:-40}
 shift || true
@@ -27,12 +28,6 @@ fi
 # counts. Loading is disk- and CPU-bound and would drag the median down.
 LOAD_SECONDS=${LOAD_SECONDS:-20}
 
-# Where "RACE" sits in the game's 640x480 logical frame. The game letterboxes to
-# 4:3 inside whatever window it gets, so this is mapped through the actual
-# window geometry at run time rather than hardcoded in screen pixels.
-RACE_X_FRACTION=0.208
-RACE_Y_FRACTION=0.694
-
 GAMEDIR="Need For Speed II SE"
 CONF="$GAMEDIR/nfs2se.conf"
 
@@ -41,62 +36,7 @@ if [ ! -f "$CONF" ]; then
 	exit 1
 fi
 
-if [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ]; then
-	echo "No DISPLAY or WAYLAND_DISPLAY. Run this from a graphical session," >&2
-	echo "otherwise you will be timing llvmpipe rather than the GPU." >&2
-	exit 1
-fi
-
-# Force SDL onto X11/XWayland. xdotool drives the game through XTEST, which
-# cannot reach native Wayland windows at all -- without this the intro is never
-# skipped and every backend gets timed on the wrong scene. Both backends get
-# the same presentation path, so the comparison stays fair.
-export SDL_VIDEODRIVER=x11
-
-if ! command -v xdotool > /dev/null 2>&1; then
-	echo "xdotool not found -- needed to skip the intro. sudo apt install xdotool" >&2
-	exit 1
-fi
-
-# Clicks a point given in the game's 640x480 logical frame, mapping it through
-# the window's real geometry and the 4:3 letterbox the game keeps inside it.
-click_logical() {
-	local win=$1 fx=$2 fy=$3
-	local X Y WIDTH HEIGHT
-
-	eval "$(xdotool getwindowgeometry --shell "$win")"
-
-	# Largest 4:3 box centred in the window, matching KeepAspectRatio=1.
-	local content_w content_h off_x off_y
-	content_w=$(awk -v w="$WIDTH" -v h="$HEIGHT" 'BEGIN{ c=h*4/3; print (c<w)?c:w }')
-	content_h=$(awk -v cw="$content_w" 'BEGIN{ print cw*3/4 }')
-	off_x=$(awk -v w="$WIDTH"  -v c="$content_w" 'BEGIN{ print (w-c)/2 }')
-	off_y=$(awk -v h="$HEIGHT" -v c="$content_h" 'BEGIN{ print (h-c)/2 }')
-
-	local px py
-	px=$(awk -v x="$X" -v o="$off_x" -v c="$content_w" -v f="$fx" 'BEGIN{ printf "%d", x+o+c*f }')
-	py=$(awk -v y="$Y" -v o="$off_y" -v c="$content_h" -v f="$fy" 'BEGIN{ printf "%d", y+o+c*f }')
-
-	xdotool mousemove --sync "$px" "$py" 2>/dev/null || true
-	sleep 0.5
-	# Press and release as separate events with a hold in between. An instant
-	# `xdotool click` is too short for the game's input polling to ever observe
-	# the button down, and the menu item never fires.
-	xdotool mousedown 1 2>/dev/null || true
-	sleep 0.25
-	xdotool mouseup 1 2>/dev/null || true
-}
-
-# Any stray instance would fight this one for the GPU and wreck the numbers.
-kill_game() {
-	pkill -x nfs2se 2>/dev/null || true
-	for _ in $(seq 20); do
-		pgrep -x nfs2se > /dev/null 2>&1 || return 0
-		sleep 0.25
-	done
-	pkill -9 -x nfs2se 2>/dev/null || true
-	sleep 0.5
-}
+game_require_tools
 
 # The game paces itself with a fixed-rate timer (src/Timer.c), so on any modern
 # GPU at 640x480 every backend simply saturates that cap and reports the same
@@ -110,7 +50,7 @@ BENCH_RESOLUTION=${BENCH_RESOLUTION:-}
 # identical. Turn it off for the duration and put it back afterwards.
 cp "$CONF" "$CONF.bench-backup"
 cleanup() {
-	kill_game
+	game_kill
 	mv -f "$CONF.bench-backup" "$CONF" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
@@ -122,7 +62,7 @@ if [ -n "$BENCH_RESOLUTION" ]; then
 	sed -i 's/^StartInFullScreen=.*/StartInFullScreen=0/' "$CONF"
 fi
 
-kill_game
+game_kill
 
 echo "Benchmarking: start a race, ${LOAD_SECONDS}s to load, then ${MEASURE_SECONDS}s measured"
 echo "Backends: ${BACKENDS[*]}"
@@ -154,31 +94,13 @@ for backend in "${BACKENDS[@]}"; do
 
 	printf 'starting race... '
 
-	# Get past the intro movie. `xdotool key` without --window goes through
-	# XTEST, which SDL honours; `--window` uses XSendEvent, which SDL ignores.
-	# Exactly ONE Escape: at the menu a second one opens "exit to system?".
 	sleep 6
-	win=""
-	for _ in $(seq 15); do
-		win=$(xdotool search --name "Need For Speed" 2>/dev/null | head -1 || true)
-		[ -n "$win" ] && break
-		sleep 1
-	done
+	win=$(game_wait_window)
 	if [ -z "$win" ]; then
 		echo "game window never appeared"
-		kill_game; rm -f "$log"; continue
+		game_kill; rm -f "$log"; continue
 	fi
-	# windowfocus, not windowactivate: the latter needs a window manager
-	# advertising _NET_ACTIVE_WINDOW, which a bare X server does not have.
-	xdotool windowfocus --sync "$win" 2>/dev/null || true
-	xdotool key Escape 2>/dev/null || true
-
-	# Let the menu settle, then start a race. Do NOT rely on the attract demo:
-	# it alternates with the menu on its own schedule, so a fixed time window
-	# lands on 2D menu frames as often as on the 3D scene we want to compare.
-	sleep 8
-	xdotool windowfocus --sync "$win" 2>/dev/null || true
-	click_logical "$win" "$RACE_X_FRACTION" "$RACE_Y_FRACTION"
+	game_start_race "$win"
 
 	printf 'loading... '
 	sleep "$LOAD_SECONDS"
@@ -197,7 +119,7 @@ for backend in "${BACKENDS[@]}"; do
 	sleep "$MEASURE_SECONDS"
 
 	kill "$gamepid" 2>/dev/null || true
-	kill_game
+	game_kill
 	wait "$gamepid" 2>/dev/null || true
 
 	samples=$(grep -oP 'FPS: \K[0-9.]+' "$log" 2>/dev/null | tail -n +$((warmup_samples + 1)) || true)

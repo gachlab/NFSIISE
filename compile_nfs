@@ -13,9 +13,11 @@ OPENGL_LIBS="-lGL"
 # something other than OpenGL.
 WIN_GFX_LIBS="-lopengl32"
 MAC_GFX_LIBS="-framework OpenGL"
-MAC_GFX_FLAGS=""
+MAC_GFX_FLAGS="-I/opt/homebrew/include -I/usr/local/include"
 ANDROID_INSTALL="no"
-CPP_LTO="-flto"
+# Overridable: CPP_LTO= isolates whether a fault is the optimiser or the
+# link-time one, which is a distinction worth being able to make in one run.
+CPP_LTO=${CPP_LTO-"-flto"}
 
 OS=$(uname)
 
@@ -71,25 +73,31 @@ function compile_x86
 
 function compile_cpp
 {
+	#
+	# Both word sizes need the patch, and for the same reason: it is what
+	# defines the dispatch table the wrapper calls the game back through, and
+	# what turns the game's addresses into offsets. A 32-bit build that skipped
+	# it did not merely run an older model -- it failed to link, because
+	# nfsCallGameFunction had no definition. See tools/patch_cpp_64bit.
+	#
+	echo -n "Patching the translated game... "
+	python3 ../tools/patch_cpp_64bit > /dev/null || exit
+	echo "OK!"
+
 	if [[ $BUILD_64 == "yes" ]]; then
 		#
-		# 64-bit build of the translated game.
+		# Position independent, which the old model could not be: it needed
+		# code and static data below 2 GiB, and a PIE is loaded far above that.
+		# Nothing needs a particular address now -- the game addresses its
+		# world by offset -- and that matters beyond tidiness: arm64 macOS
+		# ignores -no_pie outright, so a build that required it could never
+		# have run there.
 		#
-		# -no-pie is not optional. The game keeps real addresses in int32_t
-		# slots, so code and static data have to sit below 2 GiB; a position
-		# independent executable is loaded far above that and nothing works.
-		# Everything heap-allocated is handled separately by src/LowMem.c.
+		# -fpermissive downgrades the "cast loses precision" errors that the
+		# 32-bit slots produce by design on a 64-bit host. They are the
+		# intended behaviour, not oversights.
 		#
-		# -fpermissive downgrades the ~2286 "cast loses precision" errors that
-		# the truncation model produces by design. They are the intended
-		# behaviour, not oversights.
-		#
-		CPU_FLAGS="-no-pie -fno-pie"
 		CPP_EXTRA="-fpermissive -Wno-int-to-pointer-cast -Wno-pointer-to-int-cast"
-
-		echo -n "Patching the translated game for 64-bit... "
-		python3 ../tools/patch_cpp_64bit > /dev/null || exit
-		echo "OK!"
 	elif [ $(uname -m) == "x86_64" ]; then
 		CPU_FLAGS="-m32"
 	fi
@@ -103,19 +111,46 @@ function compile_cpp
 		echo "Release"
 	fi
 
+	# Same passthrough as tools/rebuild_wrapper, so that a fault which only
+	# appears in a release build can still be looked at: NFS_CPP_FLAGS="-O1 -g"
+	# bisects the optimiser, and any -g here keeps the symbols that strip would
+	# otherwise take away exactly when they are wanted.
+	FLAGS="$FLAGS ${NFS_CPP_FLAGS:-}"
+
+	# Homebrew is not on the default search path, and on macOS the Vulkan
+	# loader, MoltenVK and SDL2 all live there. compile_x86 already did this;
+	# the C++ path needs it too now that it is a macOS target at all.
+	if [ $OS == "Darwin" ]; then
+		CPU_FLAGS="$CPU_FLAGS $MAC_GFX_FLAGS"
+		MAC_LIB_PATHS="-L/opt/homebrew/lib -L/usr/local/lib"
+		#
+		# Cocoa creates windows on the first thread or not at all, and the game
+		# creates its own from a thread. Both the wrapper and the translation
+		# implement the swap; only the assembly build ever asked for it.
+		#
+		CPP_EXTRA="$CPP_EXTRA -DSWAP_WINDOW_AND_GL_THREAD"
+		MAC_C_DEFINES="-DSWAP_WINDOW_AND_GL_THREAD"
+	fi
+
 	echo -n "Compiling C++ code... "
-	$CXX -c -std=c++14 $CPU_FLAGS $CPP_LTO $FLAGS $CPP_EXTRA -Wno-c++11-narrowing -Wextra Cpp/NFS2SE.cpp -fno-rtti -fno-exceptions || exit
+	# Both spellings of the same suppression: -Wno-c++11-narrowing is clang's,
+	# -Wno-narrowing is GCC's, and each silently ignores the other's. The
+	# translated data tables initialise int32_t fields with values like
+	# 0xFFFFFFF6, so without the right one for the compiler in hand this is an
+	# error rather than a warning. The 64-bit build only ever got away with it
+	# because -fpermissive happens to downgrade it too.
+	$CXX -c -std=c++14 $CPU_FLAGS $CPP_LTO $FLAGS $CPP_EXTRA -Wno-c++11-narrowing -Wno-narrowing -Wextra Cpp/NFS2SE.cpp -fno-rtti -fno-exceptions || exit
 	echo "OK!"
 
 	echo -n "Compiling C code... "
-	$CC -c -std=gnu89 -Wno-incompatible-function-pointer-types -Wno-int-conversion -Wall $CPU_FLAGS $FLAGS $OPENGL_DEFINE -DNFS_CPP *.c || exit
+	$CC -c -std=gnu89 -Wno-incompatible-function-pointer-types -Wno-int-conversion -Wall $CPU_FLAGS $FLAGS $OPENGL_DEFINE $MAC_C_DEFINES -DNFS_CPP *.c || exit
 	echo "OK!"
 
 	echo -n "Linking... "
-	$CXX -o "../Need For Speed II SE/nfs2se" $CPU_FLAGS $CPP_LTO *.o -lSDL2 $OPENGL_LIBS -lm -lpthread || exit
+	$CXX -o "../Need For Speed II SE/nfs2se" $CPU_FLAGS $CPP_LTO *.o $MAC_LIB_PATHS -lSDL2 $OPENGL_LIBS -lm -lpthread || exit
 	echo "OK!"
 
-	if [[ $BUILD_TYPE != "debug" ]]; then
+	if [[ $BUILD_TYPE != "debug" && "$FLAGS" != *-g* ]]; then
 		echo -n "Stripping... "
 		strip "../Need For Speed II SE/nfs2se" || exit
 		echo "OK!"

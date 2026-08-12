@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+#
+# SPDX-License-Identifier: MIT
+#
+# A/B the CPU cost of two builds of the game.
+#
+# Frame rate is the wrong instrument for this. The game paces itself with a
+# fixed-rate timer (src/Timer.c) and caps out around 64 fps, so a build that
+# does more work per frame reports the same number and simply sleeps less. What
+# changes is the work, so that is what this measures: instructions retired and
+# cycles spent in the game's own thread, per frame rendered.
+#
+# Per-thread matters. Under Xvfb there is no DRI3, so Mesa falls back to
+# llvmpipe and the rendering threads burn far more CPU than the game does --
+# enough to bury the difference being looked for. perf --per-thread separates
+# them, and the translated game all runs on one thread.
+#
+# Usage: ./tools/bench_cpu [seconds] binary [binary...]
+#        ./tools/bench_cpu 30 build/nfs2se.nobase build/nfs2se.base
+
+set -e
+cd "$(dirname "$0")/.."
+. tools/lib/game_driver.sh
+
+MEASURE_SECONDS=30
+if [[ "$1" =~ ^[0-9]+$ ]]; then
+	MEASURE_SECONDS=$1
+	shift
+fi
+BINARIES=("$@")
+if [ ${#BINARIES[@]} -eq 0 ]; then
+	echo "Usage: $0 [seconds] binary [binary...]" >&2
+	exit 1
+fi
+
+# Seconds allowed for the track to load after starting a race. Loading is a
+# different workload from driving and would contaminate a steady-state number.
+LOAD_SECONDS=${LOAD_SECONDS:-25}
+REPEATS=${REPEATS:-2}
+
+GAMEDIR="Need For Speed II SE"
+CONF="$GAMEDIR/nfs2se.conf"
+
+game_require_tools
+if ! command -v perf > /dev/null 2>&1; then
+	echo "perf not found. sudo apt install linux-perf" >&2
+	exit 1
+fi
+if [ ! -f "$CONF" ]; then
+	echo "$CONF not found -- copy it from nfs2se.conf.template first." >&2
+	exit 1
+fi
+
+# VSync would pin the frame rate to the refresh rate and change how much the
+# game sleeps, which is the one thing this measurement must not depend on.
+cp "$CONF" "$CONF.bench-backup"
+cleanup() {
+	game_kill
+	mv -f "$CONF.bench-backup" "$CONF" 2>/dev/null || true
+	rm -f "$GAMEDIR/nfs2se.bench" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+sed -i 's/^VSync=.*/VSync=0/' "$CONF"
+
+# Runs one binary once. Echoes "instructions cycles frames".
+measure_once() {
+	local binary=$1 log win pid before after frames stat
+
+	game_kill
+	cp -f "$binary" "$GAMEDIR/nfs2se.bench"
+	log=$(mktemp)
+	stat=$(mktemp)
+
+	# exec, so $! is the game and not a subshell that leaves it orphaned.
+	( cd "$GAMEDIR" && exec env NFS2SE_FPS=1 ./nfs2se.bench > "$log" 2>&1 ) &
+	pid=$!
+
+	sleep 6
+	win=$(game_wait_window)
+	if [ -z "$win" ]; then
+		echo "window never appeared" >&2
+		game_kill; rm -f "$log" "$stat"; return 1
+	fi
+	# Starting a race is the realistic workload, but not a repeatable one: the
+	# game does not pick the same track and traffic twice, and the cost per
+	# frame moves by a factor of two between runs, which is far more than the
+	# difference being looked for. BENCH_NO_INPUT instead measures the intro
+	# and attract sequence, which is a recording and therefore runs the same
+	# way every time. Less representative, enormously more repeatable.
+	if [ -z "$BENCH_NO_INPUT" ]; then
+		game_start_race "$win"
+	fi
+	sleep "$LOAD_SECONDS"
+
+	# Frames are counted over exactly the perf window, from the samples the
+	# game itself prints -- one line per second, each the count for that second.
+	# Proof of what is being measured. A frame count cannot tell a race from the
+	# menu, and this harness has picked the wrong one before.
+	if [ -n "$BENCH_SHOT" ] && command -v import > /dev/null 2>&1; then
+		import -window root "bench_$(basename "$binary").png" 2>/dev/null || true
+	fi
+
+	before=$(grep -c 'FPS: ' "$log" 2>/dev/null || echo 0)
+	if [ -n "$BENCH_PROFILE" ]; then
+		# Where the frame actually goes, by shared object. Without this, a
+		# percentage measured over the whole thread cannot be read: the game
+		# thread also runs the GL driver, so a change confined to the
+		# translated code shows up diluted by however much of the thread is
+		# Mesa, and there is no way to tell a small change from a diluted one.
+		local prof
+		prof=$(mktemp)
+		perf record -q -e cycles -p "$pid" -o "$prof" -- sleep 15 2>/dev/null || true
+		echo "  whole process, cycles by object:" >&2
+		perf report -i "$prof" --sort dso --stdio 2>/dev/null \
+			| grep -E '^\s+[0-9]' | head -6 >&2
+		# ...and the same split for the busiest thread on its own, which is the
+		# one the instruction count is taken from. The two differ enormously
+		# under a software rasteriser, and only the second one says how much of
+		# what is being measured is the translated game.
+		local busiest
+		busiest=$(perf report -i "$prof" --sort tid --stdio 2>/dev/null \
+			| grep -oE '^\s+[0-9.]+%\s+[0-9]+' | head -1 | awk '{print $2}')
+		if [ -n "$busiest" ]; then
+			echo "  busiest thread ($busiest), cycles by object:" >&2
+			perf report -i "$prof" --sort dso --stdio --tid "$busiest" 2>/dev/null \
+				| grep -E '^\s+[0-9]' | head -6 >&2
+		fi
+		rm -f "$prof"
+	fi
+	perf stat --per-thread -e instructions,cycles -x, -p "$pid" -o "$stat" \
+		-- sleep "$MEASURE_SECONDS" 2>/dev/null || true
+	after=$(grep -c 'FPS: ' "$log" 2>/dev/null || echo 0)
+
+	frames=$(grep -oP 'FPS: \K[0-9.]+' "$log" | sed -n "$((before + 1)),${after}p" \
+		| awk '{s += $1} END {printf "%.0f", s}')
+
+	kill "$pid" 2>/dev/null || true
+	game_kill
+	wait "$pid" 2>/dev/null || true
+
+	# perf names each row "comm-tid", so the software rasteriser's threads can
+	# be excluded by name. This is not fussiness: under Xvfb llvmpipe retires
+	# more instructions than the game does, so taking the busiest thread would
+	# measure the rasteriser -- which is identical in both builds, and would
+	# therefore report any change to the game as free.
+	local instr cyc not_game='^(llvmpipe|mesa|vk|gallium|tc_)'
+	pick() {
+		grep ",$1" "$stat" | awk -F, -v skip="$not_game" '
+			{ split($1, t, "-"); name = t[1] }
+			name ~ skip { next }
+			{ if ($2+0 > m) { m = $2+0; who = $1 } }
+			END { printf "%.0f %s", m, who }'
+	}
+	read -r instr winner <<< "$(pick instructions)"
+	read -r cyc _ <<< "$(pick cycles)"
+	if [ -n "$BENCH_VERBOSE" ]; then
+		echo "  threads (instructions):" >&2
+		grep ',instructions' "$stat" | awk -F, '{printf "    %-24s %s\n", $1, $2}' | sort -k2 -rn | head -8 >&2
+		echo "  counted: $winner" >&2
+	fi
+
+	rm -f "$log" "$stat"
+	if [ -z "$frames" ] || [ "${frames:-0}" -lt 30 ]; then
+		echo "only ${frames:-0} frames -- did the race actually start?" >&2
+		return 1
+	fi
+	echo "$instr $cyc $frames"
+}
+
+echo "Measuring ${MEASURE_SECONDS}s of racing per run, ${REPEATS} run(s) per binary"
+echo
+printf '%-28s %14s %14s %8s\n' "binary" "instr/frame" "cycles/frame" "frames"
+
+baseline=""
+for binary in "${BINARIES[@]}"; do
+	if [ ! -x "$binary" ]; then
+		echo "$binary: not executable" >&2
+		exit 1
+	fi
+	best_instr=""; best_cyc=""; total_frames=0
+	for _ in $(seq "$REPEATS"); do
+		read -r instr cyc frames <<< "$(measure_once "$binary")" || continue
+		ipf=$(awk -v i="$instr" -v f="$frames" 'BEGIN{printf "%.0f", i/f}')
+		cpf=$(awk -v c="$cyc" -v f="$frames" 'BEGIN{printf "%.0f", c/f}')
+		# Least-loaded run wins: interference from the rest of the machine can
+		# only ever add work, never remove it.
+		if [ -z "$best_instr" ] || [ "$ipf" -lt "$best_instr" ]; then
+			best_instr=$ipf; best_cyc=$cpf
+		fi
+		total_frames=$((total_frames + frames))
+	done
+	if [ -z "$best_instr" ]; then
+		printf '%-28s %14s\n' "$(basename "$binary")" "FAILED"
+		continue
+	fi
+	if [ -z "$baseline" ]; then
+		baseline=$best_instr
+		printf '%-28s %14s %14s %8s\n' "$(basename "$binary")" "$best_instr" "$best_cyc" "$total_frames"
+	else
+		delta=$(awk -v a="$best_instr" -v b="$baseline" 'BEGIN{printf "%+.2f%%", (a/b - 1) * 100}')
+		printf '%-28s %14s %14s %8s   %s vs first\n' \
+			"$(basename "$binary")" "$best_instr" "$best_cyc" "$total_frames" "$delta"
+	fi
+done

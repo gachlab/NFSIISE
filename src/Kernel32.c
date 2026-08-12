@@ -364,10 +364,16 @@ REALIGN STDCALL BOOL SetEvent_wrap(GameAddr eventAddr)
  * onwards is read from the wrong place and entry 0 comes back with garbage in
  * its high half. Read the array at the game's element width instead.
  */
-REALIGN STDCALL uint32_t WaitForMultipleObjects_wrap(uint32_t count, const GameAddr *events, BOOL waitAll, uint32_t milliseconds)
+REALIGN STDCALL uint32_t WaitForMultipleObjects_wrap(uint32_t count, GameAddr eventsAddr, BOOL waitAll, uint32_t milliseconds)
 {
 	//milliseconds always -1 or 0
 	//waitAll always false
+	/*
+	 * The array of handles is in the game's memory, so what arrives is its
+	 * address rather than a pointer to it. That was the same thing while a
+	 * game address was a real one; it is an offset now.
+	 */
+	const GameAddr *events = (const GameAddr *)GAME_PTR(eventsAddr);
 	uint32_t i, ret = WAIT_TIMEOUT;
 	SDL_LockMutex(event_mutex);
 	for (;;)
@@ -514,7 +520,7 @@ REALIGN STDCALL GameAddr MapViewOfFile_wrap(GameAddr fMappingAddr, uint32_t desi
 }
 REALIGN STDCALL BOOL UnmapViewOfFile_wrap(GameAddr lpBaseAddress)
 {
-	lowMemFree((void *)lpBaseAddress);
+	lowMemFree(GAME_PTR(lpBaseAddress));
 	return true;
 }
 REALIGN STDCALL BOOL FlusfileBuffers_wrap(GameAddr fileAddr)

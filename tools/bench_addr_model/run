@@ -1,0 +1,64 @@
+#!/bin/sh
+#
+# SPDX-License-Identifier: MIT
+#
+# What does it cost to resolve the game's addresses against a base?
+#
+# The translated game keeps addresses in 32-bit slots and reaches memory
+# through six one-line helpers, so moving its world into an arena is a change
+# to those six functions -- but one that every single memory access pays for,
+# and there are 53,201 of them in src/Cpp/NFS2SE.cpp. This measures the price
+# before committing to it, on a kernel shaped like the translated code:
+# register plus displacement, absolute static data, and a pointer table walked
+# at a stride of four.
+#
+# Five models, and the difference between `global` and `constg` is the point:
+#
+#   direct   the address itself, which is what the game does today and what
+#            macOS and Android arm64 cannot do at all, both reserving low memory
+#   global   an offset plus a mutable global base
+#   constg   an offset plus a const global base
+#   notrunc  as constg, but sign-extending the offset rather than truncating
+#   fixed    an offset plus a compile-time constant base
+#
+# `global` and `constg` differ in one keyword and by a third of the loop. The
+# build uses -fno-strict-aliasing, so with a mutable base the compiler has to
+# reload it after every store the game makes -- and the game's inner loops are
+# mostly stores. `fixed` loses on arm64 for a different reason: a 64-bit
+# constant cannot fold into an addressing mode, whereas a base already in a
+# register can, so the constant costs an extra instruction per access that the
+# variable does not. `notrunc` measures the same as `constg`, so the truncation
+# is free and worth keeping for what it documents.
+#
+# Measured on an M4, inner loop, release flags: direct 18 instructions,
+# constg and notrunc 21, fixed 23, global 28.
+#
+# Usage: ./tools/bench_addr_model/run [iterations] [repetitions]
+
+set -e
+cd "$(dirname "$0")"
+
+CXX=${CXX:-c++}
+# The flags compile_nfs uses for a release build. -fno-strict-aliasing is not
+# incidental here; dropping it makes `global` look free, which it is not.
+OPT=${OPT:--O3 -DNDEBUG -fno-strict-aliasing -fpermissive}
+case "$(uname -s)" in
+	Linux) OPT="$OPT -no-pie" ;;
+esac
+
+ITERS=${1:-20000000}
+REPS=${2:-7}
+
+for m in DIRECT GLOBAL CONSTG NOTRUNC FIXED; do
+	lc=$(echo "$m" | tr 'A-Z' 'a-z')
+	$CXX $OPT -DMODEL_$m -DMODEL_NAME="\"$lc\"" -w \
+		-o "bench_$lc" driver.cpp "k_$lc.cpp"
+done
+
+echo "$(uname -m) $(uname -s), $ITERS iterations x $REPS"
+echo
+for m in direct global constg notrunc fixed; do
+	# `direct` cannot run where the low 4 GiB are unmappable, which is exactly
+	# the situation this whole exercise exists to get out of. Let it say so.
+	"./bench_$m" "$ITERS" "$REPS" || echo "$m: cannot run on this host"
+done

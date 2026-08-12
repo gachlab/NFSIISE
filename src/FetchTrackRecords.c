@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
 
 #include "Wrapper.h"
+#include "LowMem.h"
 
 #include <string.h>
 
-REGPARM void sub_41B250(MAYBE_THIS uint32_t arg1, void *arg2);
+REGPARM void sub_41B250(MAYBE_THIS uint32_t arg1, GameAddr arg2);
 
 #ifdef NFS_CPP
 	#define sub_41B250(a, b) \
@@ -57,7 +58,12 @@ static void readEntry(FILE *f, StfEntry *stfEntry)
 
 REALIGN REGPARM void fetchTrackRecords(MAYBE_THIS uint32_t trackNo, BOOL clear)
 {
-	char buffer[MAX_PATH];
+	/*
+	 * From the arena, not the stack: the game writes the path into this, and
+	 * it can only address what the arena holds. A local here reached the game
+	 * as a truncated host stack address, which it then wrote through.
+	 */
+	char *buffer = (char *)lowMemAlloc(MAX_PATH);
 	Stf stf;
 	FILE *f;
 
@@ -66,7 +72,7 @@ REALIGN REGPARM void fetchTrackRecords(MAYBE_THIS uint32_t trackNo, BOOL clear)
 	if (!clear)
 	{
 		//Get the track records relative file path, +20 means that we want a text file (ssf), not a binary file (stf)
-		sub_41B250(trackNo + 20, buffer);
+		sub_41B250(trackNo + 20, GAME_ADDR(buffer));
 		if ((f = openFile(buffer, "r")))
 		{
 			//Skip unneeded data
@@ -88,10 +94,12 @@ REALIGN REGPARM void fetchTrackRecords(MAYBE_THIS uint32_t trackNo, BOOL clear)
 	}
 
 	//Get the track records relative file path, get a binary file (stf)
-	sub_41B250(trackNo, buffer);
+	sub_41B250(trackNo, GAME_ADDR(buffer));
 	if ((f = openFile(buffer, "wb")))
 	{
 		fwrite(&stf, 1, sizeof stf, f);
 		fclose(f);
 	}
+
+	lowMemFree(buffer);
 }

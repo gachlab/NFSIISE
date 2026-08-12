@@ -575,11 +575,49 @@ void WrapperInit(void)
 }
 
 #ifdef SWAP_WINDOW_AND_GL_THREAD
+/*
+ * macOS only, and not an optimisation: Cocoa creates windows on the first
+ * thread or not at all. The game creates its window from a thread of its own,
+ * so on macOS the two are swapped -- the game's code moves to a second thread
+ * and the first is left to the window. Without this the window fails to open
+ * and the wrapper then tries to report that in a message box, which is itself
+ * a window, from the same wrong thread, and the process hangs there.
+ */
+#ifdef NFS_CPP
+/*
+ * The translated game is not a thread function: it is an entry in the dispatch
+ * table, and it needs its context. Both are carried across in a block the new
+ * thread owns and frees.
+ */
+typedef struct
+{
+	void *context;
+	uint32_t function;
+} GameThreadStart;
+
+static int gameThreadEntry(void *data)
+{
+	GameThreadStart start = *(GameThreadStart *)data;
+	free(data);
+	nfsCallGameFunction(start.function, start.context);
+	return 0;
+}
+
+REALIGN void WrapperStartInThread(void *this, int32_t mainCodeInSeparateThread)
+{
+	GameThreadStart *start = (GameThreadStart *)malloc(sizeof(GameThreadStart));
+	initializeSDL2();
+	start->context = this;
+	start->function = (uint32_t)mainCodeInSeparateThread;
+	SDL_DetachThread(SDL_CreateThread(gameThreadEntry, NULL, start));
+}
+#else
 REALIGN STDCALL void WrapperStartInThread(SDL_ThreadFunction mainCodeInSeparateThread)
 {
 	initializeSDL2();
 	SDL_DetachThread(SDL_CreateThread(mainCodeInSeparateThread, NULL, NULL));
 }
+#endif
 #endif
 
 extern GameAddr wndProc;
