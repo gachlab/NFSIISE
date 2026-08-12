@@ -52,12 +52,71 @@
  * reserved -- writing one is then a buffer overflow into the game's stack.
  *
  * So game-facing structs store addresses as GameAddr, never as pointers.
- * Converting is safe in both directions because everything the game can
- * reference lives below 2 GiB; see LowMem.h.
+ *
+ * A GameAddr is not an address: it is a distance from the base of the arena
+ * everything the game can reach lives in. That indirection is what lets the
+ * game run where the low 4 GiB cannot be mapped -- macOS and Android on arm64
+ * both reserve them -- and it is why converting either way needs the base.
+ * See LowMem.h and tools/patch_cpp_64bit.
  */
 typedef uint32_t GameAddr;
-#define GAME_PTR(addr) ((void *)(uintptr_t)(GameAddr)(addr))
-#define GAME_ADDR(ptr) ((GameAddr)(uintptr_t)(ptr))
+
+/*
+ * The base of that arena. Defined by the translated game, next to the arena
+ * itself, and declared here rather than in LowMem.h because the conversions
+ * below are what need it and LowMem.h includes this file, not the reverse.
+ */
+#ifdef NFS_CPP
+extern const uintptr_t g_nfsBase;
+#else
+/*
+ * The assembly build runs the real 1997 binary, which lives at its own real
+ * addresses. There is no arena and no base, so the conversions below are the
+ * identity they always were.
+ */
+#define g_nfsBase ((uintptr_t)0)
+#endif
+
+/*
+ * Functions rather than macros, for two reasons that both used to be free.
+ *
+ * Zero has to keep meaning "no address": it did automatically while a GameAddr
+ * was a truncated pointer, and adding a base to it would now yield the first
+ * byte of the arena, which is a perfectly good pointer and a completely wrong
+ * answer. Nothing is placed there, and these map it to and from NULL.
+ *
+ * And the argument must be evaluated once. Several call sites read
+ * GAME_ADDR(lowMemCalloc(num, size)); a macro with a conditional in it would
+ * allocate twice and hand back the block it then leaked.
+ */
+static inline void *gamePtr(GameAddr addr)
+{
+	return addr ? (void *)(g_nfsBase + (uintptr_t)addr) : NULL;
+}
+#if defined(NFS_CPP) && defined(NFS_CHECK_ADDR)
+extern const unsigned long g_nfsArenaBytes;
+void nfsBadAddr(unsigned long long addr);
+#endif
+
+static inline GameAddr gameAddr(const void *ptr)
+{
+#if defined(NFS_CPP) && defined(NFS_CHECK_ADDR)
+	/*
+	 * Catch it here rather than where the game trips over it.
+	 *
+	 * Only memory inside the arena has an offset to be named by. Handing over
+	 * anything else -- a wrapper static, one of its locals, a libc allocation
+	 * -- produces a number that is not an address of anything, and the game
+	 * will not fail until it dereferences it, somewhere else entirely.
+	 */
+	if (ptr && ((uintptr_t)ptr < g_nfsBase ||
+	            (uintptr_t)ptr >= g_nfsBase + g_nfsArenaBytes))
+		nfsBadAddr((unsigned long long)(uintptr_t)ptr);
+#endif
+	return ptr ? (GameAddr)((uintptr_t)ptr - g_nfsBase) : 0;
+}
+#define GAME_PTR(addr) gamePtr(addr)
+#define GAME_ADDR(ptr) gameAddr(ptr)
 
 /*
  * Compile-time layout check for those structs. C90 has no _Static_assert, so
@@ -76,5 +135,26 @@ typedef uint32_t GameAddr;
 typedef uint32_t (STDCALL *WindowProc)(MAYBE_THIS void *hWnd, uint32_t uMsg, uint32_t wParam, uint32_t lParam);
 
 char *convertFilePath(const char *srcPth, BOOL convToLower);
+
+/*
+ * A libc FILE as the game holds it: a low-memory cell containing the real
+ * pointer, referred to by GameAddr. See fopen_wrap / fclose_wrap.
+ */
+typedef struct
+{
+	FILE *file;
+} GameFile;
+
+/*
+ * Calls a game function the wrapper is holding. Under the dispatch-table model
+ * those are indices, not addresses, so they cannot simply be called -- see
+ * tools/patch_cpp_64bit. Defined by the translated game.
+ */
+#ifdef NFS_CPP
+void nfsCallGameFunction(uint32_t id, void *gameContext);
+#endif
+
+FILE *gameFileResolve(GameAddr handle);
+GameAddr gameFileWrap(FILE *file);
 
 #endif // WRAPPER_H

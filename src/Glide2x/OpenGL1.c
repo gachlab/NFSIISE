@@ -216,8 +216,15 @@ REALIGN STDCALL void grDitherMode(GrDitherMode_t mode)
 {
 // 	printf("grDitherMode: %d\n", mode);
 }
-REALIGN STDCALL void grDrawTriangle(const GrVertex *a, const GrVertex *b, const GrVertex *c)
+REALIGN STDCALL void grDrawTriangle(GameAddr aAddr, GameAddr bAddr, GameAddr cAddr)
 {
+	/*
+	 * The game passes the address of its own memory, not a pointer to it.
+	 * Those were the same thing until a game address became an offset.
+	 */
+	const GrVertex *a = (const GrVertex *)GAME_PTR(aAddr);
+	const GrVertex *b = (const GrVertex *)GAME_PTR(bAddr);
+	const GrVertex *c = (const GrVertex *)GAME_PTR(cAddr);
 // 	printf("grDrawTriangle\n");
 	const GrVertex *grVertices[3] = {a, b, c};
 	uint32_t i;
@@ -234,8 +241,14 @@ REALIGN STDCALL void grDrawTriangle(const GrVertex *a, const GrVertex *b, const 
 	}
 	glEnd();
 }
-REALIGN STDCALL void grDrawLine(const GrVertex *a, const GrVertex *b)
+REALIGN STDCALL void grDrawLine(GameAddr aAddr, GameAddr bAddr)
 {
+	/*
+	 * The game passes the address of its own memory, not a pointer to it.
+	 * Those were the same thing until a game address became an offset.
+	 */
+	const GrVertex *a = (const GrVertex *)GAME_PTR(aAddr);
+	const GrVertex *b = (const GrVertex *)GAME_PTR(bAddr);
 // 	printf("grDrawLine: [%d]\n", trianglesCount);
 	glBegin(GL_LINES); {
 		glColor4ub(a->r, a->g, a->b, a->a);
@@ -286,8 +299,13 @@ REALIGN STDCALL void grGlideShutdown(void)
 
 // 	printf("grGlideShutdown\n");
 }
-REALIGN STDCALL BOOL grLfbLock(GrLock_t type, GrBuffer_t buffer, GrLfbWriteMode_t writeMode, GrOriginLocation_t origin, BOOL pixelPipeline, GrLfbInfo_t *info)
+REALIGN STDCALL BOOL grLfbLock(GrLock_t type, GrBuffer_t buffer, GrLfbWriteMode_t writeMode, GrOriginLocation_t origin, BOOL pixelPipeline, GameAddr infoAddr)
 {
+	/*
+	 * The game passes the address of its own memory, not a pointer to it.
+	 * Those were the same thing until a game address became an offset.
+	 */
+	GrLfbInfo_t *info = (GrLfbInfo_t *)GAME_PTR(infoAddr);
 	//TODO Remove this
 	memset(info, 0, sizeof(GrLfbInfo_t));
 	if (type == GR_LFB_WRITE_ONLY)
@@ -318,8 +336,13 @@ REALIGN STDCALL BOOL grSstIsBusy(void)
 // 	printf("grSstIsBusy\n");
 	return false;
 }
-REALIGN STDCALL BOOL grSstQueryHardware(GrHwConfiguration *hwconfig)
+REALIGN STDCALL BOOL grSstQueryHardware(GameAddr hwconfigAddr)
 {
+	/*
+	 * The game passes the address of its own memory, not a pointer to it.
+	 * Those were the same thing until a game address became an offset.
+	 */
+	GrHwConfiguration *hwconfig = (GrHwConfiguration *)GAME_PTR(hwconfigAddr);
 	return true;
 }
 REALIGN STDCALL void grSstSelect(int which_sst)
@@ -391,8 +414,13 @@ REALIGN STDCALL void grTexCombineFunction(GrChipID_t tmu, GrTextureCombineFnc_t 
 {
 // 	printf("grTexCombineFunction\n");
 }
-REALIGN STDCALL void grTexDownloadMipMap(GrChipID_t tmu, uint32_t startAddress, uint32_t evenOdd, GrTexInfo *info)
+REALIGN STDCALL void grTexDownloadMipMap(GrChipID_t tmu, uint32_t startAddress, uint32_t evenOdd, GameAddr infoAddr)
 {
+	/*
+	 * The game passes the address of its own memory, not a pointer to it.
+	 * Those were the same thing until a game address became an offset.
+	 */
+	GrTexInfo *info = (GrTexInfo *)GAME_PTR(infoAddr);
 	TextureInfo *ti = &textures[startAddress >> 2];
 	uint8_t *data = (uint8_t *)GAME_PTR(info->data);
 	uint32_t size = 256 >> info->largeLod;
@@ -426,8 +454,13 @@ REALIGN STDCALL void grTexDownloadMipMap(GrChipID_t tmu, uint32_t startAddress, 
 	}
 // 	printf("grTexDownloadMipMap: 0x%.8X\n", startAddress);
 }
-REALIGN STDCALL void grTexDownloadTable(GrChipID_t tmu, GrTexTable_t type, void *data)
+REALIGN STDCALL void grTexDownloadTable(GrChipID_t tmu, GrTexTable_t type, GameAddr dataAddr)
 {
+	/*
+	 * The game passes the address of its own memory, not a pointer to it.
+	 * Those were the same thing until a game address became an offset.
+	 */
+	void *data = GAME_PTR(dataAddr);
 	if (type == GR_TEXTABLE_PALETTE)
 		palette = (uint32_t *)data;
 }
@@ -448,8 +481,13 @@ REALIGN STDCALL void grTexMipMapMode(GrChipID_t tmu, GrMipMapMode_t mode, BOOL l
 {
 	/* mode = 0 */
 }
-REALIGN STDCALL void grTexSource(GrChipID_t tmu, uint32_t startAddress, uint32_t evenOdd, GrTexInfo *info)
+REALIGN STDCALL void grTexSource(GrChipID_t tmu, uint32_t startAddress, uint32_t evenOdd, GameAddr infoAddr)
 {
+	/*
+	 * The game passes the address of its own memory, not a pointer to it.
+	 * Those were the same thing until a game address became an offset.
+	 */
+	GrTexInfo *info = (GrTexInfo *)GAME_PTR(infoAddr);
 	TextureInfo *ti = &textures[startAddress >> 2];
 	glBindTexture(GL_TEXTURE_2D, ti->id);
 	if (info->format == GR_TEXFMT_P_8 && palette && ti->palette != palette)

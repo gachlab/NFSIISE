@@ -29,7 +29,7 @@ extern float dpr;
 BOOL needRecreateGl = false;
 BOOL windowResized = false;
 
-WindowProc wndProc;
+GameAddr wndProc;   /* game function index */
 
 SDL_TouchID touchId = 0;
 float touchDX = 0.0f, touchDY = 0.0f;
@@ -64,7 +64,7 @@ static uint32_t tapEnterTimerCallback(uint32_t interval, void *param)
 static SDL_TimerID timerID;
 uint32_t watchdogTimer(uint32_t interval, void *param);
 
-REALIGN STDCALL uint32_t DefWindowProcA_wrap(void *hWnd, uint32_t uMsg, uint32_t wParam, uint32_t lParam)
+REALIGN STDCALL uint32_t DefWindowProcA_wrap(GameAddr hWnd, uint32_t uMsg, uint32_t wParam, uint32_t lParam)
 {
 	if (uMsg == WM_DESTROY)
 	{
@@ -73,7 +73,7 @@ REALIGN STDCALL uint32_t DefWindowProcA_wrap(void *hWnd, uint32_t uMsg, uint32_t
 	}
 	return 0;
 }
-REALIGN STDCALL BOOL DestroyWindow_wrap(void *hWnd)
+REALIGN STDCALL BOOL DestroyWindow_wrap(GameAddr hWnd)
 {
 	SDL_Event event;
 	event.type = WM_DESTROY;
@@ -85,7 +85,7 @@ REALIGN STDCALL BOOL DestroyWindow_wrap(void *hWnd)
 	return SDL_PushEvent(&event) == 1;
 }
 
-REALIGN STDCALL BOOL PostMessageA_wrap(void *hWnd, uint32_t uMsg, uint32_t wParam, uint32_t lParam)
+REALIGN STDCALL BOOL PostMessageA_wrap(GameAddr hWnd, uint32_t uMsg, uint32_t wParam, uint32_t lParam)
 {
 	if (uMsg >= WM_USER && uMsg < WM_USER_END)
 	{
@@ -96,8 +96,9 @@ REALIGN STDCALL BOOL PostMessageA_wrap(void *hWnd, uint32_t uMsg, uint32_t wPara
 	}
 	return false;
 }
-REALIGN STDCALL BOOL GetMessageA_wrap(MSG *msg, void *hWnd, uint32_t wMsgFilterMin, uint32_t wMsgFilterMax)
+REALIGN STDCALL BOOL GetMessageA_wrap(GameAddr msgAddr, GameAddr hWnd, uint32_t wMsgFilterMin, uint32_t wMsgFilterMax)
 {
+	MSG *msg = (MSG *)GAME_PTR(msgAddr);
 	static uint32_t lastLParam;
 	BOOL br;
 	SDL_Event event;
@@ -363,8 +364,9 @@ REALIGN STDCALL BOOL GetMessageA_wrap(MSG *msg, void *hWnd, uint32_t wMsgFilterM
 	} while (!br);
 	return -1;
 }
-REALIGN STDCALL uint32_t DispatchMessageA_wrap(MAYBE_THIS const MSG *msg)
+REALIGN STDCALL uint32_t DispatchMessageA_wrap(MAYBE_THIS GameAddr msgAddr)
 {
+	const MSG *msg = (const MSG *)GAME_PTR(msgAddr);
 	wndProc(sdlWin, msg->uMsg, msg->wParam, msg->lParam);
 	return 0;
 }
@@ -374,8 +376,10 @@ REALIGN STDCALL int GetKeyboardType_wrap(int typeFlag)
 	return 0;
 }
 
-REALIGN STDCALL int MessageBoxA_wrap(void *hWnd, const char *text, const char *caption, uint32_t type)
+REALIGN STDCALL int MessageBoxA_wrap(GameAddr hWnd, GameAddr textAddr, GameAddr captionAddr, uint32_t type)
 {
+	const char *text = (const char *)GAME_PTR(textAddr);
+	const char *caption = (const char *)GAME_PTR(captionAddr);
 	SDL_MessageBoxButtonData buttons[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "OK"}, {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 2, "Cancel"}};
 	SDL_MessageBoxData msgb = {SDL_MESSAGEBOX_WARNING, NULL, caption, text, (int32_t)(type & 0x1) + 1, buttons, NULL};
 	int buttonID;

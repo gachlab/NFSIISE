@@ -23,12 +23,19 @@ enum
 
 typedef struct
 {
-	void *hWnd;
+	/*
+	 * The game allocates this and the wrapper fills it in, so every field has
+	 * to stay where a 32-bit build put it. A native pointer here is 8 bytes
+	 * and pushes uMsg, wParam and lParam past the offsets the game reads them
+	 * from. hWnd is never dereferenced -- it is an opaque handle.
+	 */
+	GameAddr hWnd;
 	uint32_t uMsg;
 	uint32_t wParam;
 	uint32_t lParam;
 	uint32_t time;
 	uint32_t pt[2];
 } MSG;
+ASSERT_GAME_LAYOUT(MSG, 28);
 
 #endif // USER32_H

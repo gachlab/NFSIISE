@@ -1,56 +1,115 @@
 // SPDX-License-Identifier: MIT
 
 #include "Wsock32.h"
+#include "LowMem.h"
 
 extern uint16_t PORT1, PORT2;
 extern uint32_t broadcast;
 
-REALIGN STDCALL uint32_t inet_addr_wrap(const char *cp)
+REALIGN STDCALL uint32_t inet_addr_wrap(GameAddr cpAddr)
 {
+	const char *cp = (const char *)GAME_PTR(cpAddr);
 	return inet_addr(cp);
 }
 REALIGN STDCALL int listen_wrap(int fd, int n)
 {
 	return listen(fd, n);
 }
-REALIGN STDCALL char *inet_ntoa_wrap(struct in_addr in)
+REALIGN STDCALL GameAddr inet_ntoa_wrap(struct in_addr in)
 {
-	return inet_ntoa(in);
+	/*
+	 * libc hands back a pointer into its own static buffer, which sits far
+	 * above 2 GiB and so cannot survive the trip into the game's 32-bit slot.
+	 * Copy it somewhere the game can actually reach. Same lifetime as libc's:
+	 * valid until the next call.
+	 */
+	static char *buffer;
+	const char *result = inet_ntoa(in);
+
+	if (!buffer)
+		buffer = (char *)lowMemAlloc(INET_ADDRSTRLEN + 1);
+	if (!buffer || !result)
+		return 0;
+
+	strncpy(buffer, result, INET_ADDRSTRLEN);
+	buffer[INET_ADDRSTRLEN] = 0;
+	return GAME_ADDR(buffer);
 }
-REALIGN STDCALL struct win_hostent *gethostbyname_wrap(const char *name)
+REALIGN STDCALL GameAddr gethostbyname_wrap(GameAddr nameAddr)
 {
 #ifdef WIN32
-	return gethostbyname(name);
+	return (GameAddr)(uintptr_t)gethostbyname((const char *)GAME_PTR(nameAddr));
 #else
-	struct hostent *unix_hostent = gethostbyname(name);
+	struct hostent *unix_hostent = gethostbyname((const char *)GAME_PTR(nameAddr));
 	if (unix_hostent)
 	{
-		static struct win_hostent w_hostent;
-		w_hostent.h_name = unix_hostent->h_name;
-		w_hostent.h_aliases = unix_hostent->h_aliases;
-		w_hostent.h_addrtype = unix_hostent->h_addrtype;
-		w_hostent.h_length = unix_hostent->h_length;
-		w_hostent.h_addr_list = unix_hostent->h_addr_list;
-		return &w_hostent;
+		/*
+		 * Everything libc gives us lives on its own heap, far above 2 GiB, so
+		 * none of it can be handed to the game directly. Copy the name and the
+		 * first address into low memory; the game only ever reads those two.
+		 * Reused across calls, matching libc's own contract.
+		 */
+		static struct win_hostent *w_hostent;
+		static char *nameCopy;
+		static char *addrCopy;
+		static GameAddr *addrList;
+
+		if (!w_hostent)
+		{
+			w_hostent = (struct win_hostent *)lowMemAlloc(sizeof(struct win_hostent));
+			nameCopy = (char *)lowMemAlloc(256);
+			addrCopy = (char *)lowMemAlloc(16);
+			addrList = (GameAddr *)lowMemAlloc(2 * sizeof(GameAddr));
+		}
+		if (!w_hostent || !nameCopy || !addrCopy || !addrList)
+			return 0;
+
+		strncpy(nameCopy, unix_hostent->h_name ? unix_hostent->h_name : "", 255);
+		nameCopy[255] = 0;
+
+		w_hostent->h_name = GAME_ADDR(nameCopy);
+		w_hostent->h_aliases = 0;
+		w_hostent->h_addrtype = unix_hostent->h_addrtype;
+		w_hostent->h_length = unix_hostent->h_length;
+
+		if (unix_hostent->h_addr_list && unix_hostent->h_addr_list[0] &&
+		    unix_hostent->h_length > 0 && unix_hostent->h_length <= 16)
+		{
+			memcpy(addrCopy, unix_hostent->h_addr_list[0], unix_hostent->h_length);
+			addrList[0] = GAME_ADDR(addrCopy);
+			addrList[1] = 0;
+			w_hostent->h_addr_list = GAME_ADDR(addrList);
+		}
+		else
+		{
+			w_hostent->h_addr_list = 0;
+		}
+
+		return GAME_ADDR(w_hostent);
 	}
-	return NULL;
+	return 0;
 #endif
 }
-REALIGN STDCALL int gethostname_wrap(char *name, int namelen)
+REALIGN STDCALL int gethostname_wrap(GameAddr nameAddr, int namelen)
 {
+	char *name = (char *)GAME_PTR(nameAddr);
 	return gethostname(name, namelen);
 }
-REALIGN STDCALL int connect_wrap(int sock, const struct sockaddr *name, int namelen)
+REALIGN STDCALL int connect_wrap(int sock, GameAddr nameAddr, int namelen)
 {
+	const struct sockaddr *name = (const struct sockaddr *)GAME_PTR(nameAddr);
 	((struct sockaddr_in *)name)->sin_port = htons(PORT1);
 	return connect(sock, name, namelen);
 }
-REALIGN STDCALL int accept_wrap(int sock, struct sockaddr *addr, socklen_t *addrlen)
+REALIGN STDCALL int accept_wrap(int sock, GameAddr addrAddr, GameAddr addrlenAddr)
 {
+	struct sockaddr *addr = (struct sockaddr *)GAME_PTR(addrAddr);
+	socklen_t *addrlen = (socklen_t *)GAME_PTR(addrlenAddr);
 	return accept(sock, addr, addrlen);
 }
-REALIGN STDCALL int WSAFDIsSet_wrap(int fd, struct win_fd_set *w_fds)
+REALIGN STDCALL int WSAFDIsSet_wrap(int fd, GameAddr w_fdsAddr)
 {
+	struct win_fd_set *w_fds = (struct win_fd_set *)GAME_PTR(w_fdsAddr);
 #ifdef WIN32
 	return __WSAFDIsSet(fd, w_fds);
 #else
@@ -61,8 +120,12 @@ REALIGN STDCALL int WSAFDIsSet_wrap(int fd, struct win_fd_set *w_fds)
 	return 0;
 #endif
 }
-REALIGN STDCALL int select_wrap(int nfds, struct win_fd_set *readfds, struct win_fd_set *writefds, struct win_fd_set *exceptfds, struct timeval *timeout)
+REALIGN STDCALL int select_wrap(int nfds, GameAddr readfdsAddr, GameAddr writefdsAddr, GameAddr exceptfdsAddr, GameAddr timeoutAddr)
 {
+	struct win_fd_set *readfds = (struct win_fd_set *)GAME_PTR(readfdsAddr);
+	struct win_fd_set *writefds = (struct win_fd_set *)GAME_PTR(writefdsAddr);
+	struct win_fd_set *exceptfds = (struct win_fd_set *)GAME_PTR(exceptfdsAddr);
+	struct timeval *timeout = (struct timeval *)GAME_PTR(timeoutAddr);
 #ifdef WIN32
 	return select(nfds, readfds, writefds, exceptfds, timeout);
 #else
@@ -87,16 +150,20 @@ REALIGN STDCALL int select_wrap(int nfds, struct win_fd_set *readfds, struct win
 	return (readfds->fd_count = fd_count);
 #endif
 }
-REALIGN STDCALL int send_wrap(int sock, const char *buf, socklen_t len, int flags)
+REALIGN STDCALL int send_wrap(int sock, GameAddr bufAddr, socklen_t len, int flags)
 {
+	const char *buf = (const char *)GAME_PTR(bufAddr);
 	return send(sock, buf, len, flags);
 }
-REALIGN STDCALL int recv_wrap(int sock, char *buf, socklen_t len, int flags)
+REALIGN STDCALL int recv_wrap(int sock, GameAddr bufAddr, socklen_t len, int flags)
 {
+	char *buf = (char *)GAME_PTR(bufAddr);
 	return recv(sock, buf, len, flags);
 }
-REALIGN STDCALL int getsockname_wrap(int sock, struct sockaddr *name, socklen_t *namelen)
+REALIGN STDCALL int getsockname_wrap(int sock, GameAddr nameAddr, GameAddr namelenAddr)
 {
+	struct sockaddr *name = (struct sockaddr *)GAME_PTR(nameAddr);
+	socklen_t *namelen = (socklen_t *)GAME_PTR(namelenAddr);
 	if (*namelen == sizeof(struct sockaddr_ipx))
 	{
 		memset(name, 0x00, sizeof(struct sockaddr_ipx)); /* It works */
@@ -104,8 +171,9 @@ REALIGN STDCALL int getsockname_wrap(int sock, struct sockaddr *name, socklen_t 
 	}
 	return getsockname(sock, name, namelen);
 }
-REALIGN STDCALL int bind_wrap(int sock, const struct sockaddr *name, int namelen)
+REALIGN STDCALL int bind_wrap(int sock, GameAddr nameAddr, int namelen)
 {
+	const struct sockaddr *name = (const struct sockaddr *)GAME_PTR(nameAddr);
 	struct sockaddr_in name_in;
 	name_in.sin_family = AF_INET;
 	name_in.sin_addr.s_addr = INADDR_ANY;
@@ -119,8 +187,9 @@ REALIGN STDCALL uint16_t htons_wrap(uint16_t hostshort)
 {
 	return htons(hostshort);
 }
-REALIGN STDCALL int ioctlsocket_wrap(int sock, int32_t cmd, uint32_t *argp)
+REALIGN STDCALL int ioctlsocket_wrap(int sock, int32_t cmd, GameAddr argpAddr)
 {
+	uint32_t *argp = (uint32_t *)GAME_PTR(argpAddr);
 #ifndef WIN32
 	switch (cmd)
 	{
@@ -136,8 +205,9 @@ REALIGN STDCALL int ioctlsocket_wrap(int sock, int32_t cmd, uint32_t *argp)
 	return ioctlsocket(sock, cmd, (u_long *)argp);
 #endif
 }
-REALIGN STDCALL int setsockopt_wrap(int sock, int level, int optname, const char *optval, socklen_t optlen)
+REALIGN STDCALL int setsockopt_wrap(int sock, int level, int optname, GameAddr optvalAddr, socklen_t optlen)
 {
+	const char *optval = (const char *)GAME_PTR(optvalAddr);
 	switch (optname)
 	{
 		case SO_DEBUG:
@@ -222,7 +292,7 @@ REALIGN STDCALL int WSACleanup_wrap(void)
 	return 0;
 #endif
 }
-REALIGN STDCALL int WSAStartup_wrap(uint16_t wVersionRequested, void *WSAData)
+REALIGN STDCALL int WSAStartup_wrap(uint16_t wVersionRequested, GameAddr WSADataAddr)
 {
 #ifdef WIN32
 	return WSAStartup(wVersionRequested, WSAData);
@@ -230,8 +300,10 @@ REALIGN STDCALL int WSAStartup_wrap(uint16_t wVersionRequested, void *WSAData)
 	return 0;
 #endif
 }
-REALIGN STDCALL int sendto_wrap(int sock, const char *buf, socklen_t len, int flags, const struct sockaddr_ipx *to, socklen_t tolen)
+REALIGN STDCALL int sendto_wrap(int sock, GameAddr bufAddr, socklen_t len, int flags, GameAddr toAddr, socklen_t tolen)
 {
+	const char *buf = (const char *)GAME_PTR(bufAddr);
+	const struct sockaddr_ipx *to = (const struct sockaddr_ipx *)GAME_PTR(toAddr);
 	struct sockaddr_in to_in;
 	char *data = (char *)malloc(len += 2);
 
@@ -258,8 +330,11 @@ REALIGN STDCALL int sendto_wrap(int sock, const char *buf, socklen_t len, int fl
 	free(data);
 	return bsent;
 }
-REALIGN STDCALL int recvfrom_wrap(int sock, char *buf, socklen_t len, int flags, struct sockaddr_ipx *from, socklen_t *fromlen)
+REALIGN STDCALL int recvfrom_wrap(int sock, GameAddr bufAddr, socklen_t len, int flags, GameAddr fromAddr, GameAddr fromlenAddr)
 {
+	char *buf = (char *)GAME_PTR(bufAddr);
+	struct sockaddr_ipx *from = (struct sockaddr_ipx *)GAME_PTR(fromAddr);
+	socklen_t *fromlen = (socklen_t *)GAME_PTR(fromlenAddr);
 	struct sockaddr_in from_in;
 	socklen_t fromlen_in = sizeof from_in;
 	char *data = (char *)malloc(len += 2);

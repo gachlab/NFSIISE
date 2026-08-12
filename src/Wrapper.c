@@ -15,10 +15,10 @@
 
 static const char title[] = "Need For Speed II SE";
 
-typedef void (*ProcedureType)(MAYBE_THIS_SINGLE);
-static ProcedureType atExitProcedures[10];
+/* Game function indices, not addresses. */
+static GameAddr atExitProcedures[10];
 static uint32_t atExitProcedureCount;
-REALIGN STDCALL void WrapperAtExit(ProcedureType proc)
+REALIGN STDCALL void WrapperAtExit(GameAddr proc)
 {
 	if (atExitProcedureCount < 10)
 		atExitProcedures[atExitProcedureCount++] = proc;
@@ -66,7 +66,7 @@ void exit_func(void)
 		timerID = SDL_AddTimer(2500, watchdogTimer, NULL);
 #ifdef NFS_CPP
 		extern void *main_game_thread;
-		atExitProcedures[i](main_game_thread);
+		nfsCallGameFunction(atExitProcedures[i], main_game_thread);
 #else
 		atExitProcedures[i]();
 #endif
@@ -575,16 +575,54 @@ void WrapperInit(void)
 }
 
 #ifdef SWAP_WINDOW_AND_GL_THREAD
+/*
+ * macOS only, and not an optimisation: Cocoa creates windows on the first
+ * thread or not at all. The game creates its window from a thread of its own,
+ * so on macOS the two are swapped -- the game's code moves to a second thread
+ * and the first is left to the window. Without this the window fails to open
+ * and the wrapper then tries to report that in a message box, which is itself
+ * a window, from the same wrong thread, and the process hangs there.
+ */
+#ifdef NFS_CPP
+/*
+ * The translated game is not a thread function: it is an entry in the dispatch
+ * table, and it needs its context. Both are carried across in a block the new
+ * thread owns and frees.
+ */
+typedef struct
+{
+	void *context;
+	uint32_t function;
+} GameThreadStart;
+
+static int gameThreadEntry(void *data)
+{
+	GameThreadStart start = *(GameThreadStart *)data;
+	free(data);
+	nfsCallGameFunction(start.function, start.context);
+	return 0;
+}
+
+REALIGN void WrapperStartInThread(void *this, int32_t mainCodeInSeparateThread)
+{
+	GameThreadStart *start = (GameThreadStart *)malloc(sizeof(GameThreadStart));
+	initializeSDL2();
+	start->context = this;
+	start->function = (uint32_t)mainCodeInSeparateThread;
+	SDL_DetachThread(SDL_CreateThread(gameThreadEntry, NULL, start));
+}
+#else
 REALIGN STDCALL void WrapperStartInThread(SDL_ThreadFunction mainCodeInSeparateThread)
 {
 	initializeSDL2();
 	SDL_DetachThread(SDL_CreateThread(mainCodeInSeparateThread, NULL, NULL));
 }
 #endif
+#endif
 
-extern WindowProc wndProc;
+extern GameAddr wndProc;
 
-REALIGN STDCALL SDL_Window *WrapperCreateWindow(WindowProc windowProc)
+REALIGN STDCALL SDL_Window *WrapperCreateWindow(GameAddr windowProc)
 {
 #ifndef __ANDROID__
 	static const uint32_t palette[8] = {0xFF000000, 0xFF000080, 0xFF0000FF, 0xFFC0C0C0, 0xFF00FFFF, 0xFFFFFFFF, 0x00000000, 0xFF008080};
@@ -717,41 +755,78 @@ REALIGN void SDL_Delay_wrap(uint32_t ms)
  * same thing on a 32-bit build and very much not on a 64-bit one, so the
  * argument is taken as an opaque block and decoded in GameVarargs.c.
  */
-REALIGN int32_t vsprintf_wrap(char *s, const char *fmt, void *arg)
+REALIGN int32_t vsprintf_wrap(GameAddr sAddr, GameAddr fmtAddr, GameAddr argAddr)
 {
-	return gameVsprintf(s, fmt, arg);
+	return gameVsprintf((char *)GAME_PTR(sAddr), (const char *)GAME_PTR(fmtAddr), GAME_PTR(argAddr));
 }
-REALIGN int32_t fscanf_wrap(FILE *f, const char *fmt, ...)
+
+/*
+ * The game opens files and keeps the result in a 32-bit register, but a libc
+ * FILE lives on libc's own heap, far above 2 GiB. Hand back a low-memory cell
+ * holding the real pointer instead, and unwrap it on the way back in.
+ */
+FILE *gameFileResolve(GameAddr handle)
 {
-	int ret;
-	va_list arg;
-	va_start(arg, fmt);
-	ret = vfscanf(f, fmt, arg);
-	va_end(arg);
+	GameFile *gameFile = (GameFile *)GAME_PTR(handle);
+	return gameFile ? gameFile->file : NULL;
+}
+GameAddr gameFileWrap(FILE *file)
+{
+	GameFile *gameFile;
+	if (!file)
+		return 0;
+	gameFile = (GameFile *)lowMemAlloc(sizeof(GameFile));
+	if (!gameFile)
+	{
+		fclose(file);
+		return 0;
+	}
+	gameFile->file = file;
+	return GAME_ADDR(gameFile);
+}
+
+/*
+ * Every call site in the translated game passes exactly one output pointer,
+ * and it is a game address rather than a host one. Spelling that out beats
+ * another va_list bridge for a single argument -- if a call with a different
+ * shape ever turns up, this is where it will fail loudly.
+ */
+REALIGN int32_t fscanf_wrap(GameAddr fileHandle, GameAddr fmtAddr, GameAddr outAddr)
+{
+	FILE *f = gameFileResolve(fileHandle);
+	if (!f)
+		return -1;
+	return fscanf(f, (const char *)GAME_PTR(fmtAddr), GAME_PTR(outAddr));
+}
+REALIGN int32_t fclose_wrap(GameAddr fileHandle)
+{
+	GameFile *gameFile = (GameFile *)GAME_PTR(fileHandle);
+	int32_t ret;
+	if (!gameFile || !gameFile->file)
+		return -1;
+	ret = fclose(gameFile->file);
+	gameFile->file = NULL;
+	lowMemFree(gameFile);
 	return ret;
-}
-REALIGN int32_t fclose_wrap(FILE *f)
-{
-	return fclose(f);
 }
 /*
  * The game's entire heap flows through these three. On a 64-bit build they must
  * return addresses below 2 GiB, because the translated code stores whatever it
  * gets back in an int32_t. See LowMem.h.
  */
-REALIGN void *calloc_wrap(size_t num, size_t size)
+REALIGN GameAddr calloc_wrap(size_t num, size_t size)
 {
-	return lowMemCalloc(num, size);
+	return GAME_ADDR(lowMemCalloc(num, size));
 }
-REALIGN void *malloc_wrap(size_t num)
+REALIGN GameAddr malloc_wrap(size_t num)
 {
-	return lowMemAlloc(num);
+	return GAME_ADDR(lowMemAlloc(num));
 }
-REALIGN void free_wrap(void *ptr)
+REALIGN void free_wrap(GameAddr ptr)
 {
-	lowMemFree(ptr);
+	lowMemFree(GAME_PTR(ptr));
 }
-REALIGN time_t time_wrap(time_t *timer)
+REALIGN time_t time_wrap(GameAddr timerAddr)
 {
-	return time(timer);
+	return time((time_t *)GAME_PTR(timerAddr));
 }

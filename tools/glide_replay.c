@@ -54,19 +54,22 @@ extern STDCALL BOOL grSstWinOpen(uint32_t hWnd, GrScreenResolution_t res, GrScre
 extern STDCALL void grBufferClear(GrColor_t color, GrAlpha_t alpha, uint16_t depth);
 extern STDCALL void grBufferSwap(int swap_interval);
 extern STDCALL void grClipWindow(uint32_t minX, uint32_t minY, uint32_t maxX, uint32_t maxY);
-extern STDCALL void grDrawTriangle(const GrVertex *a, const GrVertex *b, const GrVertex *c);
-extern STDCALL void grDrawLine(const GrVertex *a, const GrVertex *b);
+/* Defined with the harness's arena, below. */
+static GameAddr gameCopy(const void *src, size_t size);
+
+extern STDCALL void grDrawTriangle(GameAddr aAddr, GameAddr bAddr, GameAddr cAddr);
+extern STDCALL void grDrawLine(GameAddr aAddr, GameAddr bAddr);
 extern STDCALL void grAlphaBlendFunction(GrAlphaBlendFnc_t rgb_sf, GrAlphaBlendFnc_t rgb_df, GrAlphaBlendFnc_t alpha_sf, GrAlphaBlendFnc_t alpha_df);
 extern STDCALL void grAlphaCombine(GrCombineFunction_t function, GrCombineFactor_t factor, GrCombineLocal_t local, GrCombineOther_t other, BOOL invert);
 extern STDCALL void grDepthMask(BOOL mask);
 extern STDCALL void grFogMode(GrFogMode_t mode);
 extern STDCALL void grFogColorValue(GrColor_t color);
-extern STDCALL void grFogTable(const GrFog_t ft[GR_FOG_TABLE_SIZE]);
+extern STDCALL void grFogTable(GameAddr ftAddr);
 extern STDCALL void grGammaCorrectionValue(float value);
-extern STDCALL void grTexDownloadMipMap(GrChipID_t tmu, uint32_t startAddress, uint32_t evenOdd, GrTexInfo *info);
-extern STDCALL void grTexDownloadTable(GrChipID_t tmu, GrTexTable_t type, void *data);
-extern STDCALL void grTexSource(GrChipID_t tmu, uint32_t startAddress, uint32_t evenOdd, GrTexInfo *info);
-extern STDCALL void guFogGenerateExp(GrFog_t fogtable[GR_FOG_TABLE_SIZE], float density);
+extern STDCALL void grTexDownloadMipMap(GrChipID_t tmu, uint32_t startAddress, uint32_t evenOdd, GameAddr infoAddr);
+extern STDCALL void grTexDownloadTable(GrChipID_t tmu, GrTexTable_t type, GameAddr dataAddr);
+extern STDCALL void grTexSource(GrChipID_t tmu, uint32_t startAddress, uint32_t evenOdd, GameAddr infoAddr);
+extern STDCALL void guFogGenerateExp(GameAddr fogtableAddr, float density);
 
 /* ---- Trace helpers ------------------------------------------------------- */
 
@@ -97,7 +100,7 @@ static GrVertex vertex(float x, float y, float oow, float r, float g, float b, f
 
 static void triangle(GrVertex a, GrVertex b, GrVertex c)
 {
-	grDrawTriangle(&a, &b, &c);
+	grDrawTriangle(gameCopy(&a, sizeof a), gameCopy(&b, sizeof b), gameCopy(&c, sizeof c));
 }
 
 /* A quad as two triangles, in the winding the game uses. */
@@ -114,11 +117,74 @@ static void quad(float x0, float y0, float x1, float y1, float oow,
 
 /* ---- Synthetic textures -------------------------------------------------- */
 
-static uint16_t g_tex565[64 * 64];
-static uint16_t g_tex1555[32 * 32];
-static uint16_t g_tex4444[32 * 32];
-static uint8_t  g_texP8[64 * 64];
-static uint32_t g_palette[256];
+/*
+ * The harness has no game, so it has to be the game's memory as well.
+ *
+ * The backends take game addresses now, and an address only means anything
+ * against a base -- so everything they will be handed has to live in one
+ * object whose start is that base. This is the same shape the real arena has,
+ * in miniature, which is the point: it exercises the same conversions.
+ */
+static struct {
+	unsigned char reserved[16];   /* nothing at offset zero, as in the game */
+	uint16_t tex565[64 * 64];
+	uint16_t tex1555[32 * 32];
+	uint16_t tex4444[32 * 32];
+	uint8_t  texP8[64 * 64];
+	uint32_t palette[256];
+	unsigned char scratch[64 * 1024];
+	unsigned char blocks[640 * 480 * 2 + 4096];
+	GrFog_t fog[GR_FOG_TABLE_SIZE];
+} g_gameMemory;
+
+const uintptr_t g_nfsBase = (uintptr_t)&g_gameMemory;
+
+#define g_tex565  g_gameMemory.tex565
+#define g_tex1555 g_gameMemory.tex1555
+#define g_tex4444 g_gameMemory.tex4444
+#define g_texP8   g_gameMemory.texP8
+#define g_palette g_gameMemory.palette
+
+/*
+ * The backends allocate the linear frame buffer through LowMem and hand its
+ * address to the game, so it has to come from the arena here too. A bump
+ * allocator is enough: the harness never frees anything meaningfully.
+ */
+void *lowMemAlloc(size_t size);
+void lowMemFree(void *ptr);
+
+void *lowMemAlloc(size_t size)
+{
+	static size_t used;
+	size = (size + 15u) & ~(size_t)15u;
+	if (used + size > sizeof g_gameMemory.blocks)
+		return NULL;
+	used += size;
+	return g_gameMemory.blocks + used - size;
+}
+
+void lowMemFree(void *ptr)
+{
+	(void)ptr;
+}
+
+/*
+ * Puts a value where the game would have kept it and returns its address.
+ *
+ * Vertices and texture descriptors are built on the C stack here, which is not
+ * somewhere a game address can point. The ring wraps because the backend has
+ * consumed the value by the time the call returns.
+ */
+static GameAddr gameCopy(const void *src, size_t size)
+{
+	static size_t used;
+	size = (size + 15u) & ~(size_t)15u;
+	if (used + size > sizeof g_gameMemory.scratch)
+		used = 0;
+	memcpy(g_gameMemory.scratch + used, src, size);
+	used += size;
+	return GAME_ADDR(g_gameMemory.scratch + used - size);
+}
 
 #define ADDR_565  0x000000
 #define ADDR_1555 0x010000
@@ -161,7 +227,7 @@ static void downloadTexture(uint32_t address, GrLOD_t largeLod, GrTextureFormat_
 	info.aspectRatio = GR_ASPECT_1x1;
 	info.format = format;
 	info.data = GAME_ADDR(data);
-	grTexDownloadMipMap(GR_TMU0, address, 0, &info);
+	grTexDownloadMipMap(GR_TMU0, address, 0, gameCopy(&info, sizeof info));
 }
 
 static void bindTexture(uint32_t address, GrLOD_t largeLod, GrTextureFormat_t format)
@@ -172,7 +238,7 @@ static void bindTexture(uint32_t address, GrLOD_t largeLod, GrTextureFormat_t fo
 	info.largeLod = largeLod;
 	info.aspectRatio = GR_ASPECT_1x1;
 	info.format = format;
-	grTexSource(GR_TMU0, address, 0, &info);
+	grTexSource(GR_TMU0, address, 0, gameCopy(&info, sizeof info));
 }
 
 static void setTextured(BOOL textured)
@@ -227,7 +293,7 @@ static void replayFrame(int frameIndex)
 	grAlphaBlendFunction(GR_BLEND_SRC_ALPHA, GR_BLEND_ONE_MINUS_SRC_ALPHA, GR_BLEND_ONE, GR_BLEND_ZERO);
 	grFogMode(GR_FOG_WITH_TABLE);
 	grFogColorValue(0x00808080);
-	grTexDownloadTable(GR_TMU0, GR_TEXTABLE_PALETTE, g_palette);
+	grTexDownloadTable(GR_TMU0, GR_TEXTABLE_PALETTE, GAME_ADDR(g_palette));
 	bindTexture(ADDR_P8, GR_LOD_64, GR_TEXFMT_P_8);
 	quad(220.0f, 220.0f, 400.0f, 400.0f, 0.05f, 255.0f, 255.0f, 255.0f, 255.0f);
 	grFogMode(GR_FOG_DISABLE);
@@ -244,7 +310,7 @@ static void replayFrame(int frameIndex)
 	{
 		GrVertex a = vertex(10.0f, 410.0f + i * 8.0f, 0.5f, 255.0f, 255.0f, 0.0f, 255.0f, 0.0f, 0.0f);
 		GrVertex b = vertex(630.0f, 410.0f + i * 8.0f + wobble, 0.5f, 0.0f, 255.0f, 255.0f, 255.0f, 0.0f, 0.0f);
-		grDrawLine(&a, &b);
+		grDrawLine(gameCopy(&a, sizeof a), gameCopy(&b, sizeof b));
 	}
 
 	/*
@@ -267,7 +333,6 @@ int main(int argc, char *argv[])
 {
 	int frames = 30;
 	int i;
-	GrFog_t fogTable[GR_FOG_TABLE_SIZE];
 
 	for (i = 1; i < argc; ++i)
 	{
@@ -316,8 +381,9 @@ int main(int argc, char *argv[])
 
 	grGammaCorrectionValue(1.0f);
 
-	guFogGenerateExp(fogTable, 0.6f);
-	grFogTable(fogTable);
+	/* In the arena, not on the C stack: guFogGenerateExp writes into it. */
+	guFogGenerateExp(GAME_ADDR(g_gameMemory.fog), 0.6f);
+	grFogTable(GAME_ADDR(g_gameMemory.fog));
 
 	/* Textures are downloaded once, as the game does at track load. */
 	downloadTexture(ADDR_565,  GR_LOD_64, GR_TEXFMT_RGB_565,   g_tex565);

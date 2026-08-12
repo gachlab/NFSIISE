@@ -35,9 +35,16 @@
 
 	#define WRAP_NAME(name) name##_wrap
 	#define MAYBE_STATIC
+	/*
+	 * A COM slot holds a function index, and these thunks are the wrapper's
+	 * own, so the generator never saw them -- they register at run time.
+	 */
+	uint32_t nfsRegisterFunction(void (*fn)(void *));
+	#define GAME_FN(name) nfsRegisterFunction((void (*)(void *))WRAP_NAME(name))
 #else
 	#define WRAP_NAME(name) name
 	#define MAYBE_STATIC static
+	#define GAME_FN(name) GAME_FN(name)
 #endif
 
 #include <SDL2/SDL_events.h>
@@ -514,16 +521,42 @@ static void setEffect(DirectInputEffect *dinputEffect, const DIEFFECT *di_eff)
 
 /// DirectInputObject
 
-MAYBE_STATIC REALIGN STDCALL uint32_t QueryInterface(void **this, const IID *const riid, void **object)
+MAYBE_STATIC REALIGN STDCALL uint32_t QueryInterface(GameAddr thisAddr, GameAddr riidAddr, GameAddr objectAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	void *thisObj = (void *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	void **this = &thisObj;
+	const IID *const riid = (const IID *const)GAME_PTR(riidAddr);
+	void **object = (void **)GAME_PTR(objectAddr);
 	/* Joystick only */
 	++((DirectInputObject *)(*this - sizeof(DirectInputObject)))->ref;
-	*object = this;
+	/*
+	 * The same interface back, named the way the game named it. `this` is a
+	 * pointer to a local holding the object, so writing it would put a host
+	 * stack address into four bytes of the game's memory -- which is exactly
+	 * what it used to do by accident, and what the arena makes visible.
+	 */
+	*(GameAddr *)object = thisAddr;
 //	fprintf(stderr, "QueryInterface: 0x%X %p\n", (*riid)[0], *this);
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t Release(void **this)
+MAYBE_STATIC REALIGN STDCALL uint32_t Release(GameAddr thisAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	void *thisObj = (void *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	void **this = &thisObj;
 	DirectInputObject *dinputObj = (DirectInputObject *)(*this - sizeof(DirectInputObject));
 	if (--dinputObj->ref)
 		return 0;
@@ -553,7 +586,8 @@ MAYBE_STATIC REALIGN STDCALL uint32_t Release(void **this)
 	}
 
 	lowMemFree(dinputObj);
-	lowMemFree(this);
+	/* The slot itself, not the local that stands in for reading through it. */
+	lowMemFree(GAME_PTR(thisAddr));
 
 //	fprintf(stderr, "Release: 0x%p\n", *this);
 	return 0;
@@ -561,33 +595,79 @@ MAYBE_STATIC REALIGN STDCALL uint32_t Release(void **this)
 
 /// DirectInputEffect
 
-MAYBE_STATIC REALIGN STDCALL uint32_t SetParameters(DirectInputEffect **this, const DIEFFECT *eff, uint32_t flags)
+MAYBE_STATIC REALIGN STDCALL uint32_t SetParameters(GameAddr thisAddr, GameAddr effAddr, uint32_t flags)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputEffect *thisObj = (DirectInputEffect *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputEffect **this = &thisObj;
+	const DIEFFECT *eff = (const DIEFFECT *)GAME_PTR(effAddr);
 //	fprintf(stderr, "[%p] SetParameters: %X %X\n", *this, (*this)->effect.type, flags);
 	setEffect(*this, eff);
 	maybeRestartEffect(*this);
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t Start(DirectInputEffect **this, uint32_t iterations, uint32_t flags)
+MAYBE_STATIC REALIGN STDCALL uint32_t Start(GameAddr thisAddr, uint32_t iterations, uint32_t flags)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputEffect *thisObj = (DirectInputEffect *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputEffect **this = &thisObj;
 //	fprintf(stderr, "[%p] Start: %X %d %X\n", *this, (*this)->effect.type, iterations, flags);
 	(*this)->playing = true;
 	maybeRestartEffect(*this);
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t Stop(DirectInputEffect **this)
+MAYBE_STATIC REALIGN STDCALL uint32_t Stop(GameAddr thisAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputEffect *thisObj = (DirectInputEffect *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputEffect **this = &thisObj;
 //	fprintf(stderr, "[%p] Stop: %X\n", *this, (*this)->effect.type);
 	maybeStopEffect(*this, false);
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t Download(DirectInputEffect **this)
+MAYBE_STATIC REALIGN STDCALL uint32_t Download(GameAddr thisAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputEffect *thisObj = (DirectInputEffect *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputEffect **this = &thisObj;
 //	fprintf(stderr, "[%p] Download: %X\n", *this, (*this)->real_type);
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t Unload(DirectInputEffect **this)
+MAYBE_STATIC REALIGN STDCALL uint32_t Unload(GameAddr thisAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputEffect *thisObj = (DirectInputEffect *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputEffect **this = &thisObj;
 //	fprintf(stderr, "[%p] Unload: %X\n", *this, (*this)->effect.type);
 	maybeStopEffect(*this, false);
 	return 0;
@@ -595,8 +675,18 @@ MAYBE_STATIC REALIGN STDCALL uint32_t Unload(DirectInputEffect **this)
 
 /// DirectInputDevice
 
-MAYBE_STATIC REALIGN STDCALL uint32_t GetCapabilities(DirectInputDevice **this, DIDEVCAPS *devCaps)
+MAYBE_STATIC REALIGN STDCALL uint32_t GetCapabilities(GameAddr thisAddr, GameAddr devCapsAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
+	DIDEVCAPS *devCaps = (DIDEVCAPS *)GAME_PTR(devCapsAddr);
 	/* Joystick only */
 	if ((*this)->guid.a == JOYSTICK)
 	{
@@ -608,8 +698,19 @@ MAYBE_STATIC REALIGN STDCALL uint32_t GetCapabilities(DirectInputDevice **this, 
 	}
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t SetProperty(DirectInputDevice **this, const GUID *const rguidProp, const DIPROPHEADER *pdiph)
+MAYBE_STATIC REALIGN STDCALL uint32_t SetProperty(GameAddr thisAddr, GameAddr rguidPropAddr, GameAddr pdiphAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
+	const GUID *const rguidProp = (const GUID *const)GAME_PTR(rguidPropAddr);
+	const DIPROPHEADER *pdiph = (const DIPROPHEADER *)GAME_PTR(pdiphAddr);
 	if (rguidProp == (void *)0x7 /*DIPROP_FFGAIN*/)
 	{
 		(*this)->gain = ((const DIPROPDWORD *)pdiph)->dwData / 100;
@@ -618,18 +719,46 @@ MAYBE_STATIC REALIGN STDCALL uint32_t SetProperty(DirectInputDevice **this, cons
 	}
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t Acquire(DirectInputDevice **this)
+MAYBE_STATIC REALIGN STDCALL uint32_t Acquire(GameAddr thisAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
 //	fprintf(stderr, "Acquire: %p %X\n", *this);
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t Unacquire(DirectInputDevice **this)
+MAYBE_STATIC REALIGN STDCALL uint32_t Unacquire(GameAddr thisAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
 //	fprintf(stderr, "Unacquire: %u\n", (*this)->ref);
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t GetDeviceState(DirectInputDevice **this, uint32_t cbData, void *data)
+MAYBE_STATIC REALIGN STDCALL uint32_t GetDeviceState(GameAddr thisAddr, uint32_t cbData, GameAddr dataAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
+	void *data = GAME_PTR(dataAddr);
 	/* Joystick only */
 	if (!data || cbData != sizeof(DIJOYSTATE) || (*this)->guid.a != JOYSTICK)
 		return 0;
@@ -754,8 +883,19 @@ MAYBE_STATIC REALIGN STDCALL uint32_t GetDeviceState(DirectInputDevice **this, u
 
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t GetDeviceData(DirectInputDevice **this, uint32_t cbObjectData, DIDEVICEOBJECTDATA *rgdod, uint32_t *pdwInOut, uint32_t dwFlags)
+MAYBE_STATIC REALIGN STDCALL uint32_t GetDeviceData(GameAddr thisAddr, uint32_t cbObjectData, GameAddr rgdodAddr, GameAddr pdwInOutAddr, uint32_t dwFlags)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
+	DIDEVICEOBJECTDATA *rgdod = (DIDEVICEOBJECTDATA *)GAME_PTR(rgdodAddr);
+	uint32_t *pdwInOut = (uint32_t *)GAME_PTR(pdwInOutAddr);
 	/* Mouse only. This implementation forces the absolute position of the mouse cursor. */
 	if (!rgdod || !pdwInOut || (*this)->guid.a != MOUSE || *pdwInOut < 3)
 		return 0;
@@ -806,26 +946,66 @@ MAYBE_STATIC REALIGN STDCALL uint32_t GetDeviceData(DirectInputDevice **this, ui
 
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t SetDataFormat(DirectInputDevice **this, const DIDATAFORMAT *df)
+MAYBE_STATIC REALIGN STDCALL uint32_t SetDataFormat(GameAddr thisAddr, GameAddr dfAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
+	const DIDATAFORMAT *df = (const DIDATAFORMAT *)GAME_PTR(dfAddr);
 	/* NFSIISE uses standard data format:
 	 * 	Mouse    - c_dfDIMouse
 	 * 	Joystick - c_dfDIJoystick
 	*/
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t SetEventNotification(DirectInputDevice **this, void *hEvent)
+MAYBE_STATIC REALIGN STDCALL uint32_t SetEventNotification(GameAddr thisAddr, GameAddr hEvent)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
 //	fprintf(stderr, "SetEventNotification: %p 0x%p\n", *this, hEvent);
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t SetCooperativeLevel(DirectInputDevice **this, void *hwnd, uint32_t dwFlags)
+MAYBE_STATIC REALIGN STDCALL uint32_t SetCooperativeLevel(GameAddr thisAddr, GameAddr hwnd, uint32_t dwFlags)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
 //	fprintf(stderr, "SetCooperativeLevel: %p %p 0x%X\n", *this, hwnd, dwFlags);
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t CreateEffect(DirectInputDevice **this, const GUID *const rguid, const DIEFFECT *di_eff, DirectInputEffect ***deff, void *punkOuter)
+MAYBE_STATIC REALIGN STDCALL uint32_t CreateEffect(GameAddr thisAddr, GameAddr rguidAddr, GameAddr di_effAddr, GameAddr deffAddr, GameAddr punkOuter)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
+	const GUID *const rguid = (const GUID *const)GAME_PTR(rguidAddr);
+	const DIEFFECT *di_eff = (const DIEFFECT *)GAME_PTR(di_effAddr);
+	DirectInputEffect ***deff = (DirectInputEffect ***)GAME_PTR(deffAddr);
 	/* Joystick only */
 	DirectInputEffect *dinput_eff = (DirectInputEffect *)lowMemCalloc(1, sizeof(DirectInputObject) + sizeof(DirectInputEffect));
 	((DirectInputObject *)dinput_eff)->ref = 1;
@@ -833,11 +1013,11 @@ MAYBE_STATIC REALIGN STDCALL uint32_t CreateEffect(DirectInputDevice **this, con
 	dinput_eff->gain = &(*this)->gain;
 	dinput_eff->effect_idx = -1;
 
-	dinput_eff->SetParameters = GAME_ADDR(WRAP_NAME(SetParameters));
-	dinput_eff->Start = GAME_ADDR(WRAP_NAME(Start));
-	dinput_eff->Stop = GAME_ADDR(WRAP_NAME(Stop));
-	dinput_eff->Download = GAME_ADDR(WRAP_NAME(Download));
-	dinput_eff->Unload = GAME_ADDR(WRAP_NAME(Unload));
+	dinput_eff->SetParameters = GAME_FN(SetParameters);
+	dinput_eff->Start = GAME_FN(Start);
+	dinput_eff->Stop = GAME_FN(Stop);
+	dinput_eff->Download = GAME_FN(Download);
+	dinput_eff->Unload = GAME_FN(Unload);
 
 	memcpy(&dinput_eff->guid, rguid, sizeof(GUID));
 
@@ -855,8 +1035,13 @@ MAYBE_STATIC REALIGN STDCALL uint32_t CreateEffect(DirectInputDevice **this, con
 	 * address since everything here is allocated below 2 GiB.
 	 */
 	{
-		DirectInputEffect **iface = (DirectInputEffect **)lowMemAlloc(sizeof(void *));
-		*iface = dinput_eff;
+		/*
+		 * Four bytes, holding an address as the game understands one.
+		 * sizeof(void *) reserved eight and stored a host pointer, which
+		 * only agreed with what the game reads back by accident.
+		 */
+		GameAddr *iface = (GameAddr *)lowMemAlloc(sizeof(GameAddr));
+		*iface = GAME_ADDR(dinput_eff);
 		*(GameAddr *)deff = GAME_ADDR(iface);
 	}
 
@@ -867,15 +1052,34 @@ MAYBE_STATIC REALIGN STDCALL uint32_t CreateEffect(DirectInputDevice **this, con
 
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t GetObjectInfo(DirectInputDevice **this, DIDEVICEOBJECTINSTANCEA *pdidoi, uint32_t dwObj, uint32_t dwHow)
+MAYBE_STATIC REALIGN STDCALL uint32_t GetObjectInfo(GameAddr thisAddr, GameAddr pdidoiAddr, uint32_t dwObj, uint32_t dwHow)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
+	DIDEVICEOBJECTINSTANCEA *pdidoi = (DIDEVICEOBJECTINSTANCEA *)GAME_PTR(pdidoiAddr);
 	/* Joystick only */
 //	fprintf(stderr, "GetObjectInfo: %p %d %d\n", *this, dwObj, dwHow);
 	memset(&pdidoi->guidType, 0, sizeof(DIDEVICEOBJECTINSTANCEA) - sizeof(uint32_t));
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t SendForceFeedbackCommand(DirectInputDevice **this, uint32_t flags)
+MAYBE_STATIC REALIGN STDCALL uint32_t SendForceFeedbackCommand(GameAddr thisAddr, uint32_t flags)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
 	/* Joystick only */
 //	fprintf(stderr, "[%p] SendForceFeedbackCommand: %X\n", *this, flags);
 	int32_t i;
@@ -902,8 +1106,17 @@ MAYBE_STATIC REALIGN STDCALL uint32_t SendForceFeedbackCommand(DirectInputDevice
 	}
 	return 0;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t Poll(DirectInputDevice **this)
+MAYBE_STATIC REALIGN STDCALL uint32_t Poll(GameAddr thisAddr)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	DirectInputDevice *thisObj = (DirectInputDevice *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	DirectInputDevice **this = &thisObj;
 	/* Joystick only */
 
 	SDL_JoystickUpdate();
@@ -915,29 +1128,40 @@ MAYBE_STATIC REALIGN STDCALL uint32_t Poll(DirectInputDevice **this)
 
 /// DirectInput
 
-MAYBE_STATIC REALIGN STDCALL uint32_t CreateDevice(void **this, const GUID *const rguid, DirectInputDevice ***directInputDevice, void *unkOuter)
+MAYBE_STATIC REALIGN STDCALL uint32_t CreateDevice(GameAddr thisAddr, GameAddr rguidAddr, GameAddr directInputDeviceAddr, GameAddr unkOuter)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	void *thisObj = (void *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	void **this = &thisObj;
+	const GUID *const rguid = (const GUID *const)GAME_PTR(rguidAddr);
+	DirectInputDevice ***directInputDevice = (DirectInputDevice ***)GAME_PTR(directInputDeviceAddr);
 	DirectInputDevice *dinputDev = (DirectInputDevice *)lowMemCalloc(1, sizeof(DirectInputObject) + sizeof(DirectInputDevice));
 	((DirectInputObject *)dinputDev)->ref = 1;
 	((DirectInputObject *)dinputDev)->is_device = true;
 	dinputDev = (void *)dinputDev + sizeof(DirectInputObject);
 
-	dinputDev->QueryInterface = GAME_ADDR(WRAP_NAME(QueryInterface));
-	dinputDev->Release = GAME_ADDR(WRAP_NAME(Release));
+	dinputDev->QueryInterface = GAME_FN(QueryInterface);
+	dinputDev->Release = GAME_FN(Release);
 
-	dinputDev->GetCapabilities = GAME_ADDR(WRAP_NAME(GetCapabilities));
-	dinputDev->SetProperty = GAME_ADDR(WRAP_NAME(SetProperty));
-	dinputDev->Acquire = GAME_ADDR(WRAP_NAME(Acquire));
-	dinputDev->Unacquire = GAME_ADDR(WRAP_NAME(Unacquire));
-	dinputDev->GetDeviceState = GAME_ADDR(WRAP_NAME(GetDeviceState));
-	dinputDev->GetDeviceData = GAME_ADDR(WRAP_NAME(GetDeviceData));
-	dinputDev->SetDataFormat = GAME_ADDR(WRAP_NAME(SetDataFormat));
-	dinputDev->SetEventNotification = GAME_ADDR(WRAP_NAME(SetEventNotification));
-	dinputDev->SetCooperativeLevel = GAME_ADDR(WRAP_NAME(SetCooperativeLevel));
-	dinputDev->GetObjectInfo = GAME_ADDR(WRAP_NAME(GetObjectInfo));
-	dinputDev->CreateEffect = GAME_ADDR(WRAP_NAME(CreateEffect));
-	dinputDev->SendForceFeedbackCommand = GAME_ADDR(WRAP_NAME(SendForceFeedbackCommand));
-	dinputDev->Poll = GAME_ADDR(WRAP_NAME(Poll));
+	dinputDev->GetCapabilities = GAME_FN(GetCapabilities);
+	dinputDev->SetProperty = GAME_FN(SetProperty);
+	dinputDev->Acquire = GAME_FN(Acquire);
+	dinputDev->Unacquire = GAME_FN(Unacquire);
+	dinputDev->GetDeviceState = GAME_FN(GetDeviceState);
+	dinputDev->GetDeviceData = GAME_FN(GetDeviceData);
+	dinputDev->SetDataFormat = GAME_FN(SetDataFormat);
+	dinputDev->SetEventNotification = GAME_FN(SetEventNotification);
+	dinputDev->SetCooperativeLevel = GAME_FN(SetCooperativeLevel);
+	dinputDev->GetObjectInfo = GAME_FN(GetObjectInfo);
+	dinputDev->CreateEffect = GAME_FN(CreateEffect);
+	dinputDev->SendForceFeedbackCommand = GAME_FN(SendForceFeedbackCommand);
+	dinputDev->Poll = GAME_FN(Poll);
 
 	memcpy(&dinputDev->guid, rguid, sizeof(GUID));
 
@@ -946,8 +1170,13 @@ MAYBE_STATIC REALIGN STDCALL uint32_t CreateDevice(void **this, const GUID *cons
 	if (dinputDev->guid.a == MOUSE || dinputDev->guid.a == JOYSTICK)
 	{
 		{
-			DirectInputDevice **iface = (DirectInputDevice **)lowMemAlloc(sizeof(void *));
-			*iface = dinputDev;
+			/*
+		 * Four bytes, holding an address as the game understands one.
+		 * sizeof(void *) reserved eight and stored a host pointer, which
+		 * only agreed with what the game reads back by accident.
+		 */
+		GameAddr *iface = (GameAddr *)lowMemAlloc(sizeof(GameAddr));
+			*iface = GAME_ADDR(dinputDev);
 			*(GameAddr *)directInputDevice = GAME_ADDR(iface);
 		}
 		return 0;
@@ -957,8 +1186,17 @@ MAYBE_STATIC REALIGN STDCALL uint32_t CreateDevice(void **this, const GUID *cons
 	lowMemFree((void *)dinputDev - sizeof(DirectInputObject));
 	return -1;
 }
-MAYBE_STATIC REALIGN STDCALL uint32_t EnumDevices(void **this, uint32_t devType, DIENUMDEVICESCALLBACKA callback, void *ref, uint32_t dwFlags)
+MAYBE_STATIC REALIGN STDCALL uint32_t EnumDevices(GameAddr thisAddr, uint32_t devType, DIENUMDEVICESCALLBACKA callback, GameAddr ref, uint32_t dwFlags)
 {
+	/*
+	 * The game's handle is the address of a four-byte slot holding the
+	 * address of the object. Both are game addresses, so both need the
+	 * base -- and the slot really is four bytes, which is why it cannot
+	 * simply be read as a pointer. Kept behind `this` so the reads below
+	 * are unchanged; nothing ever writes through it.
+	 */
+	void *thisObj = (void *)GAME_PTR(*(const GameAddr *)GAME_PTR(thisAddr));
+	void **this = &thisObj;
 	if (devType != 4 /* DIDEVTYPE_JOYSTICK */)
 		return 0;
 
@@ -979,7 +1217,7 @@ MAYBE_STATIC REALIGN STDCALL uint32_t EnumDevices(void **this, uint32_t devType,
 		deviceInstance->guidInstance.a = JOYSTICK;
 		deviceInstance->guidInstance.b = i;
 #ifdef NFS_CPP
-		if (!wrap_stdcall2_ret(dinput_game_thread, callback, GAME_ADDR(deviceInstance), GAME_ADDR(ref)))
+		if (!wrap_stdcall2_ret(dinput_game_thread, callback, GAME_ADDR(deviceInstance), ref))
 #else
 		if (!callback(deviceInstance, ref))
 #endif
@@ -994,19 +1232,25 @@ MAYBE_STATIC REALIGN STDCALL uint32_t EnumDevices(void **this, uint32_t devType,
 
 /// Entrypoint
 
-REALIGN STDCALL uint32_t DirectInputCreateA_wrap(MAYBE_THIS void *hInstance, uint32_t version, DirectInput ***directInputA, void *unkOuter)
+REALIGN STDCALL uint32_t DirectInputCreateA_wrap(MAYBE_THIS GameAddr hInstance, uint32_t version, GameAddr directInputAAddr, GameAddr unkOuter)
 {
+	DirectInput ***directInputA = (DirectInput ***)GAME_PTR(directInputAAddr);
 	DirectInput *dinput = (DirectInput *)lowMemCalloc(1, sizeof(DirectInputObject) + sizeof(DirectInput));
 	((DirectInputObject *)dinput)->ref = 1;
 	dinput = (void *)dinput + sizeof(DirectInputObject);
 
-	dinput->Release = GAME_ADDR(WRAP_NAME(Release));
-	dinput->CreateDevice = GAME_ADDR(WRAP_NAME(CreateDevice));
-	dinput->EnumDevices = GAME_ADDR(WRAP_NAME(EnumDevices));
+	dinput->Release = GAME_FN(Release);
+	dinput->CreateDevice = GAME_FN(CreateDevice);
+	dinput->EnumDevices = GAME_FN(EnumDevices);
 
 	{
-		DirectInput **iface = (DirectInput **)lowMemAlloc(sizeof(void *));
-		*iface = dinput;
+		/*
+		 * Four bytes, holding an address as the game understands one.
+		 * sizeof(void *) reserved eight and stored a host pointer, which
+		 * only agreed with what the game reads back by accident.
+		 */
+		GameAddr *iface = (GameAddr *)lowMemAlloc(sizeof(GameAddr));
+		*iface = GAME_ADDR(dinput);
 		*(GameAddr *)directInputA = GAME_ADDR(iface);
 	}
 

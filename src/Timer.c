@@ -7,22 +7,22 @@
 static SDL_TimerID timerID;
 
 typedef void Event;
-STDCALL BOOL SetEvent_wrap(Event *event);
+STDCALL BOOL SetEvent_wrap(GameAddr event);
 
 #ifdef NFS_CPP
 	/*
 	 * These name 4-byte slots in the game's static data that hold event
-	 * handles. Declaring them Event** and dereferencing reads 8 bytes on a
-	 * 64-bit build, so the handle comes back with whatever follows it in the
-	 * high half -- a pointer like 0x6400000000. Read the slot at its real
-	 * width and widen explicitly instead. See Wrapper.h for GameAddr.
+	 * handles. Declaring them Event** and dereferencing would read 8 bytes on
+	 * a 64-bit build, returning a handle with whatever follows it in the high
+	 * half. Read the slot at its real width and pass the handle straight to
+	 * SetEvent_wrap, which takes a GameAddr.
 	 */
 	extern GameAddr *dword_4DDA70, *dword_5637CC, *dword_5637D8;
 	extern uint32_t *dword_4DB1B0, *dword_5637A0;
 
-	#define dword_4DDA70 ((Event *)GAME_PTR(*dword_4DDA70))
-	#define dword_5637CC ((Event *)GAME_PTR(*dword_5637CC))
-	#define dword_5637D8 ((Event *)GAME_PTR(*dword_5637D8))
+	#define dword_4DDA70 (*dword_4DDA70)
+	#define dword_5637CC (*dword_5637CC)
+	#define dword_5637D8 (*dword_5637D8)
 	#define dword_4DB1B0 (*dword_4DB1B0)
 	#define dword_5637A0 (*dword_5637A0)
 #else

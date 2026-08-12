@@ -25,8 +25,9 @@ REALIGN STDCALL uint32_t timeEndPeriod_wrap(uint32_t period)
 	return 0;
 #endif
 }
-REALIGN STDCALL uint32_t timeGetDevCaps_wrap(TIMECAPS *tc, uint32_t cbtc)
+REALIGN STDCALL uint32_t timeGetDevCaps_wrap(GameAddr tcAddr, uint32_t cbtc)
 {
+	TIMECAPS *tc = (TIMECAPS *)GAME_PTR(tcAddr);
 #ifdef WIN32
 	return timeGetDevCaps(tc, cbtc);
 #else

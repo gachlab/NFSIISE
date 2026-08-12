@@ -7,19 +7,29 @@ src/Cpp is a submodule pointing at upstream NFSIISE-CPP, so the changes live
 here as a patch script rather than as edits in this repository's history. It is
 idempotent: running it twice is harmless, and `--check` only reports.
 
-There are exactly three changes, which is the whole point -- see LowMem.h for
-why so little is needed.
+What it does, in one sentence: the 32-bit values the game keeps in its
+registers, its stack and its static tables stop being addresses and become
+offsets into a single arena.
 
-  1. The __WORDSIZE guard, which hard-errors on anything but a 32-bit build.
-  2. push32's size assertion. A handful of call sites push a real pointer,
-     which is 4 bytes on a 32-bit build and 8 on a 64-bit one.
-  3. The only two allocations in 249k lines -- the CPU's simulated stack and
-     the Game context -- which must come from below 2 GiB.
+That is what lets the game run at all on arm64 macOS and Android, which reserve
+the low 4 GiB outright and so can never satisfy the old model's requirement
+that every address the game sees fit in 32 bits.
 
-Everything else survives untouched: the ~2286 pointer-to-int32 truncations the
-compiler complains about are exactly the ones that are correct provided every
-address the game can see fits in 32 bits, which is what LowMem and -no-pie
-between them guarantee.
+The changes, in the order they are applied:
+
+  1. The guards that hard-error on anything but a 32-bit CPU, and that ask
+     glibc's spelling of the endianness question.
+  2. The six accessors, which is where an offset becomes a host address -- and
+     the ~700 places that reached memory without them.
+  3. The static tables: pointer fields narrowed to 4 bytes, function addresses
+     replaced by indices into a generated dispatch table (code is not in the
+     arena and has no offset), and _data and _bss moved into the arena.
+  4. The 4751 accessors for those statics, from addresses to offsets.
+  5. The handful of places that hand a real pointer across the boundary: the
+     CPU's simulated stack, the Game context, push32.
+
+Both word sizes use the same model. There is no version of this where they
+differ, which is deliberate: one model is one thing to get right.
 """
 
 import sys
@@ -30,42 +40,203 @@ CPP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "Cpp
 
 CHANGES = [
     (
+        "byteswap portability",
+        "#include <byteswap.h>",
+        """/*
+ * byteswap.h is glibc's, and the game is no longer built only against glibc.
+ * The compiler builtins are everywhere the game now goes -- macOS and Android
+ * included -- and bswap_32 is the only one the translation uses.
+ */
+#if defined(__GLIBC__)
+#include <byteswap.h>
+#else
+#define bswap_16(x) __builtin_bswap16(x)
+#define bswap_32(x) __builtin_bswap32(x)
+#define bswap_64(x) __builtin_bswap64(x)
+#endif""",
+    ),
+    (
+        "endianness guard",
+        """#if !defined(__BYTE_ORDER) || !defined(__LITTLE_ENDIAN) || (__BYTE_ORDER != __LITTLE_ENDIAN)
+	#error "This game is compatible only with little-endian CPUs!"
+#endif""",
+        """/*
+ * __BYTE_ORDER and __LITTLE_ENDIAN come from glibc's endian.h. The compiler
+ * defines its own, which is what to ask on macOS and Android -- and the answer
+ * is still little-endian on every target the game runs on.
+ */
+#if !defined(__BYTE_ORDER__) || (__BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__)
+	#error "This game is compatible only with little-endian CPUs!"
+#endif""",
+    ),
+    (
         "WORDSIZE guard",
         '''#if !defined(__WORDSIZE) || (__WORDSIZE != 32)
 \t#error "This game is compatible only with 32-bit CPUs!"
 #endif''',
-        '''#if !defined(__WORDSIZE)
-\t#error "__WORDSIZE is not defined!"
-#endif
-#if (__WORDSIZE != 32)
-/*
- * 64-bit build. The game stores real addresses in int32_t slots, so this is
- * only sound while every address it can observe fits in 32 bits. That is what
- * -no-pie (code and static data low) and LowMem.h (everything heap-allocated
- * low) exist to guarantee. Build with -fpermissive: the truncations the
- * compiler flags are the intended ones.
+        '''/*
+ * The game stores offsets into one arena in its int32_t slots, rather than
+ * addresses. That is what lets it run where the low 4 GiB cannot be mapped --
+ * arm64 macOS and Android both reserve them -- and it is why the word size no
+ * longer decides anything here: both builds use the same model, so there is
+ * only one of them to get right. Build 64-bit with -fpermissive: the
+ * pointer truncations the compiler flags are the intended ones.
  */
 extern "C" void *lowMemAlloc(unsigned long size);
 extern "C" void lowMemFree(void *ptr);
-#else
-#define lowMemAlloc malloc
-#define lowMemFree free
-#endif
+/*
+ * The base every game address is resolved against, and the reason the game no
+ * longer needs to live at real low addresses -- which is what macOS and
+ * Android arm64 require, neither being able to map the low 4 GiB at all.
+ *
+ * It is const because this build uses -fno-strict-aliasing: were it mutable,
+ * the compiler would have to reload it after every store the game makes, and
+ * the game's inner loops are almost entirely stores. Measured on a kernel
+ * modelled on this file: 21 instructions per iteration const, 28 mutable.
+ * See tools/bench_addr_model.
+ */
+extern "C" { extern const uintptr_t g_nfsBase; }
+extern "C" void nfsBadAddr(unsigned long long addr);
+/*
+ * macOS only, where the window has to be created on the first thread: the
+ * game's code is handed over as a dispatch-table index with its context. A
+ * linkage specification is only allowed at namespace scope, which is why this
+ * is here rather than beside its one use in _start.
+ */
+extern "C" void WrapperStartInThread(void *gameContext, int32_t mainCode);
+#define NFS_BASE g_nfsBase
 
 /*
  * An address stored in the game's static data. The game indexes its pointer
  * tables at a 4-byte stride (`to32i(off_421560 + eax * 4)`), so these fields
  * must stay 4 bytes wide no matter what the host's pointer size is -- widening
  * them would both break that indexing and shift the layout of everything after
- * them in _data. NFS_GA truncates in the static initialisers, which the linker
- * resolves as ordinary 32-bit relocations because the build is -no-pie and all
- * of _data sits below 2 GiB.
- *
- * On a 32-bit build this is exactly what void * already was, so it changes
- * nothing there.
+ * them in _data. Since those initialisers now hold offsets rather than
+ * addresses, NFS_GA no longer truncates anything: the values are already
+ * 32-bit constants and need no relocation at all, which is what frees the
+ * executable from having to load below 2 GiB.
  */
 typedef uint32_t GameAddr32;
-#define NFS_GA(p) ((GameAddr32)(uintptr_t)(p))''',
+#define NFS_GA(p) ((GameAddr32)(uintptr_t)(p))
+
+/*
+ * A function, as the game stores one. Code cannot be addressed by an offset
+ * into the arena, so referenced functions get an index into a generated
+ * dispatch table instead, tagged in the top nibble so that a call site can
+ * tell it apart from a data offset. See tools/patch_cpp_64bit.
+ */
+#define NFS_FN_TAG  0xF0000000u
+#define NFS_FN(idx) ((GameAddr32)(NFS_FN_TAG | (idx)))
+extern void (*const g_nfsFuncTable[])(void *);
+extern const uint32_t g_nfsFuncCount;
+/* Defined far below, but call() needs it up here. */
+extern "C" void nfsCallGameFunction(uint32_t id, void *gameContext);
+extern "C" uint32_t nfsRegisterFunction(void (*fn)(void *));
+
+#include <cstdio>
+static inline void nfsBadCall(uint32_t target)
+{
+	/*
+	 * Fail loudly. Before the table existed this would have jumped to whatever
+	 * the value happened to address, which is how a mistake here used to
+	 * present as corruption three subsystems away.
+	 */
+	fprintf(stderr, "NFS: indirect call through %#x, which is not a function index\\n", target);
+	abort();
+}''',
+    ),
+    (
+        "address resolution",
+        '''\ttemplate<typename T>
+\tstatic FnInl(double &) to64f(const T addr)
+\t{
+\t\tassert((uintptr_t)addr % 4 == 0);
+\t\treturn *(double *)addr;
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(float &) to32f(const T addr)
+\t{
+\t\tassert((uintptr_t)addr % 4 == 0);
+\t\treturn *(float *)addr;
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(int64_t &) to64i(const T addr)
+\t{
+\t\treturn *(int64_t *)addr;
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(int32_t &) to32i(const T addr)
+\t{
+\t\treturn *(int32_t *)addr;
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(int16_t &) to16i(const T addr)
+\t{
+\t\treturn *(int16_t *)addr;
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(int8_t &) to8i(const T addr)
+\t{
+\t\treturn *(int8_t *)addr;
+\t}''',
+        '''\t/*
+\t * Every memory access the game makes lands here. This is the one place
+\t * where a 32-bit game address becomes a host address, which is what makes
+\t * moving the game's world into an arena a change to six functions rather
+\t * than to fifty thousand call sites.
+\t *
+\t * The (uint32_t) is load-bearing rather than tidiness: addresses arrive in
+\t * int32_t slots, and without it any value with the top bit set would
+\t * sign-extend and resolve nowhere near the arena.
+\t */
+\ttemplate<typename T>
+\tstatic FnInl(void *) nfsMem(const T addr)
+\t{
+#ifdef NFS_CHECK_ADDR
+\t\t/*
+\t\t * Fail here, rather than three subsystems away. An address that does
+\t\t * not fit in 32 bits is a real host pointer that reached a slot the
+\t\t * game truncates -- a wrapper handing over one of its own locals, say.
+\t\t * That is the one failure mode this address model has, so it is worth
+\t\t * a build that hunts for it.
+\t\t */
+\t\tif ((uint64_t)(uintptr_t)addr >> 31)
+\t\t\tnfsBadAddr((uint64_t)(uintptr_t)addr);
+#endif
+\t\treturn (void *)(NFS_BASE + (uint32_t)(uintptr_t)addr);
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(double &) to64f(const T addr)
+\t{
+\t\tassert((uintptr_t)addr % 4 == 0);
+\t\treturn *(double *)nfsMem(addr);
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(float &) to32f(const T addr)
+\t{
+\t\tassert((uintptr_t)addr % 4 == 0);
+\t\treturn *(float *)nfsMem(addr);
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(int64_t &) to64i(const T addr)
+\t{
+\t\treturn *(int64_t *)nfsMem(addr);
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(int32_t &) to32i(const T addr)
+\t{
+\t\treturn *(int32_t *)nfsMem(addr);
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(int16_t &) to16i(const T addr)
+\t{
+\t\treturn *(int16_t *)nfsMem(addr);
+\t}
+\ttemplate<typename T>
+\tstatic FnInl(int8_t &) to8i(const T addr)
+\t{
+\t\treturn *(int8_t *)nfsMem(addr);
+\t}''',
     ),
     (
         "push32 size assertion",
@@ -92,8 +263,15 @@ typedef uint32_t GameAddr32;
     ),
     (
         "CPU stack allocation",
-        "\t\tstack = (uint8_t *)malloc(stack_size);",
-        "\t\tstack = (uint8_t *)lowMemAlloc(stack_size);",
+        '''\t\tstack = (uint8_t *)malloc(stack_size);
+\t\tesp = (int32_t)stack + stack_size;''',
+        '''\t\tstack = (uint8_t *)lowMemAlloc(stack_size);
+\t\t/*
+\t\t * esp is a game value, so it is an offset like every other one. The
+\t\t * stack comes from the arena precisely so that this subtraction has
+\t\t * an answer.
+\t\t */
+\t\tesp = (int32_t)((uintptr_t)stack - NFS_BASE) + stack_size;''',
     ),
     (
         "CPU stack release",
@@ -102,8 +280,173 @@ typedef uint32_t GameAddr32;
     ),
     (
         "Game context allocation",
-        "\tGame *new_game_ctx = (Game *)malloc(sizeof(Game));",
-        "\tGame *new_game_ctx = (Game *)lowMemAlloc(sizeof(Game));",
+        '''\tGame *new_game_ctx = (Game *)malloc(sizeof(Game));
+\tnew (new_game_ctx) Game();
+\tpush32(new_game_ctx);''',
+        '''\tGame *new_game_ctx = (Game *)lowMemAlloc(sizeof(Game));
+\tnew (new_game_ctx) Game();
+\t/*
+\t * The context goes onto the game's stack, and what goes there is an
+\t * offset. It reaches the wrapper as the thread's parameter and comes back
+\t * through GAME_PTR when the thread starts, so pushing the pointer itself
+\t * would survive only as far as the truncation.
+\t */
+\tpush32((GameAddr32)((uintptr_t)new_game_ctx - NFS_BASE));''',
+    ),
+    (
+        "indirect call dispatch",
+        '''	template<typename T>
+	FnInl(void) call(const T addr)
+	{
+		esp -= 4;
+		((void(*)(void *))addr)(this);
+		esp += 4;
+	}''',
+        '''	template<typename T>
+	FnInl(void) call(const T addr)
+	{
+		/*
+		 * The game calls through values it keeps in 32-bit slots. Those are
+		 * no longer addresses -- code lives outside the arena -- so they are
+		 * tagged indices into a generated table. An untagged value here means
+		 * the game is trying to call data, which is a bug worth failing on
+		 * rather than jumping into whatever it points at.
+		 */
+		const uint32_t target = (uint32_t)(uintptr_t)addr;
+		esp -= 4;
+		if ((target & NFS_FN_TAG) == NFS_FN_TAG)
+			nfsCallGameFunction(target, this);
+		else
+			nfsBadCall(target);
+		esp += 4;
+	}''',
+    ),
+    (
+        "wrapper call-in helpers",
+        r'''extern "C" void wrap_regparm2(Game &game, void (*func)(Game &), int32_t arg0, int32_t arg1)
+{
+	game.eax = arg0;
+	game.edx = arg1;
+	func(game);
+}
+
+extern "C" int32_t wrap_stdcall2_ret(Game &game, void (*func)(Game &), int32_t arg0, int32_t arg1)
+{
+	game.push32(arg1);
+	game.push32(arg0);
+	game.esp -= 4;
+	func(game);
+	game.esp += 4;
+	return game.eax;
+}
+extern "C" void wrap_stdcall4(Game &game, void (*func)(Game &), int32_t arg0, int32_t arg1, int32_t arg2, int32_t arg3)
+{
+	game.push32(arg3);
+	game.push32(arg2);
+	game.push32(arg1);
+	game.push32(arg0);
+	game.esp -= 4;
+	func(game);
+	game.esp += 4;
+}''',
+        r'''/*
+ * Calling back into the game from the wrapper.
+ *
+ * The wrapper holds game functions as table indices rather than addresses --
+ * see build_function_table -- so everything it calls in through resolves the
+ * index here. nfsCallGameFunction is for the wrapper's own stored pointers
+ * (thread start routines, the window proc, the audio callbacks); the wrap_*
+ * helpers below are the ones the translated game's own thunks go through.
+ */
+/*
+ * The wrapper's own thunks -- the COM vtable entries in DInput.c -- are not
+ * visible to the generator, so they register at run time and take indices that
+ * continue on from the generated table's.
+ */
+#define NFS_MAX_REGISTERED 64
+static void (*g_nfsRegistered[NFS_MAX_REGISTERED])(void *);
+static uint32_t g_nfsRegisteredCount;
+
+extern "C" uint32_t nfsRegisterFunction(void (*fn)(void *))
+{
+	uint32_t i;
+	if (!fn)
+		return 0;
+	/* Stable across repeated registration, so a vtable rebuilt after a device
+	 * is recreated keeps the same indices. */
+	for (i = 0; i < g_nfsRegisteredCount; ++i)
+		if (g_nfsRegistered[i] == fn)
+			return NFS_FN_TAG | (g_nfsFuncCount + i);
+	if (g_nfsRegisteredCount >= NFS_MAX_REGISTERED)
+	{
+		fprintf(stderr, "NFS: too many registered wrapper functions\\n");
+		abort();
+	}
+	g_nfsRegistered[g_nfsRegisteredCount] = fn;
+	return NFS_FN_TAG | (g_nfsFuncCount + g_nfsRegisteredCount++);
+}
+
+static void (*nfsLookup(uint32_t index))(void *)
+{
+	if (index < g_nfsFuncCount)
+		return g_nfsFuncTable[index];
+	if (index - g_nfsFuncCount < g_nfsRegisteredCount)
+		return g_nfsRegistered[index - g_nfsFuncCount];
+	return 0;
+}
+
+extern "C" void nfsCallGameFunction(uint32_t id, void *gameContext)
+{
+	if ((id & NFS_FN_TAG) == NFS_FN_TAG)
+	{
+		void (*fn)(void *) = nfsLookup(id & ~NFS_FN_TAG);
+		if (fn)
+		{
+			fn(gameContext);
+			return;
+		}
+	}
+	nfsBadCall(id);
+}
+
+static void (*nfsResolve(uint32_t id))(void *)
+{
+	if ((id & NFS_FN_TAG) == NFS_FN_TAG)
+	{
+		void (*fn)(void *) = nfsLookup(id & ~NFS_FN_TAG);
+		if (fn)
+			return fn;
+	}
+	nfsBadCall(id);
+	return 0;
+}
+
+extern "C" void wrap_regparm2(Game &game, uint32_t func, int32_t arg0, int32_t arg1)
+{
+	game.eax = arg0;
+	game.edx = arg1;
+	nfsResolve(func)(&game);
+}
+
+extern "C" int32_t wrap_stdcall2_ret(Game &game, uint32_t func, int32_t arg0, int32_t arg1)
+{
+	game.push32(arg1);
+	game.push32(arg0);
+	game.esp -= 4;
+	nfsResolve(func)(&game);
+	game.esp += 4;
+	return game.eax;
+}
+extern "C" void wrap_stdcall4(Game &game, uint32_t func, int32_t arg0, int32_t arg1, int32_t arg2, int32_t arg3)
+{
+	game.push32(arg3);
+	game.push32(arg2);
+	game.push32(arg1);
+	game.push32(arg0);
+	game.esp -= 4;
+	nfsResolve(func)(&game);
+	game.esp += 4;
+}''',
     ),
     (
         "entry point Game contexts",
@@ -117,16 +460,16 @@ typedef uint32_t GameAddr32;
         '''extern "C" void nfs2seEntrypoint()
 {
 \t/*
-\t * These cannot be locals on a 64-bit build. The translation hands the
-\t * context to the wrapper as `(int32_t)this` -- six call sites do it, e.g.
-\t * DirectInputCreateA_wrap -- which is lossless when a pointer is 4 bytes
-\t * and throws away the upper half when it is 8. The real thread stack lives
-\t * around 0x7fff..., so a local arrives as a truncated address that faults
-\t * the moment the wrapper calls back into the game through it.
+\t * Allocated rather than locals, and from the arena rather than the heap.
 \t *
-\t * Allocating them below 2 GiB makes that truncation lossless again, which
-\t * is the same bargain the rest of the port makes. Deliberately never freed:
-\t * they live for the whole process and the game exits through exit().
+\t * The six sites that hand a context to the wrapper once truncated it to 32
+\t * bits, which only worked while it sat below 2 GiB; they now pass the
+\t * pointer whole, so that is no longer the reason. The reason now is that
+\t * the game reaches its own context through offsets like everything else,
+\t * and a real thread stack around 0x7fff... has no offset to be named by.
+\t *
+\t * Deliberately never freed: they live for the whole process and the game
+\t * exits through exit().
 \t */
 \tGame *game = new (lowMemAlloc(sizeof(Game))) Game();
 \tGame *audio = new (lowMemAlloc(sizeof(Game))) Game();
@@ -136,6 +479,81 @@ typedef uint32_t GameAddr32;
 }''',
     ),
 ]
+
+
+def build_function_table(source):
+    """Replace code addresses with indices into a generated dispatch table.
+
+    The game stores function addresses in 32-bit slots -- 295 sites take one
+    directly, and 195 more sit in the static tables alongside data addresses.
+    Under base+offset there is no address that can represent code, because the
+    executable is not in the arena, so each referenced function gets an index
+    instead and `call` dispatches through a table.
+
+    The indices are tagged in their top nibble so a call site can tell a
+    function from a data offset, and so that mistaking one for the other traps
+    instead of jumping somewhere arbitrary.
+
+    Ordering works out: the generated `static Fn(void) sub_X(Game *)`
+    trampolines all sit in one block, before both the _data initialiser and
+    every use, so the table can go straight after them.
+
+    Returns (source, count).
+    """
+    # The trampolines are matched by name against the set the file actually
+    # defines, not against a pattern. Guessing the shape of a generated name
+    # has gone wrong three times here: `nullsub_N` sits alongside `sub_XXXX`,
+    # and among 2502 trampolines are `doStart`, `bcopy_`, `strstr_` and other
+    # readable names. `bcopy_` is referenced from a table of function pointers,
+    # so a pattern that missed it left one entry as a truncated address that
+    # the dispatcher would refuse to call.
+    trampolines = set(re.findall(
+        r'^static Fn\(void\) (\w+)\(Game \*self\)', source, re.M))
+    if not trampolines:
+        raise RuntimeError("no trampoline definitions found")
+
+    referenced = set()
+    for pattern in (r'\(int32_t\)(\w+)\b', r'NFS_GA\((\w+)\)', r'push32\((\w+)\)'):
+        referenced.update(n for n in re.findall(pattern, source) if n in trampolines)
+    if not referenced:
+        return source, 0
+
+    ordered = sorted(referenced)
+    index_of = {name: i for i, name in enumerate(ordered)}
+
+    entries = "".join(f"\t(void (*)(void *))&{name},\n" for name in ordered)
+    table = (
+        "\n/* Generated by tools/patch_cpp_64bit -- see build_function_table. */\n"
+        "void (*const g_nfsFuncTable[])(void *) = {\n"
+        f"{entries}"
+        "};\n"
+        f"const uint32_t g_nfsFuncCount = {len(ordered)};\n"
+    )
+
+    # Straight after the last trampoline definition, whichever prefix it uses.
+    last = None
+    for m in re.finditer(r'^static Fn\(void\) (?:null)?sub_[0-9A-Fa-f]+\(Game \*self\).*$', source, re.M):
+        last = m
+    if last is None:
+        raise RuntimeError("no trampoline definitions found")
+    source = source[:last.end()] + "\n" + table + source[last.end():]
+
+    # Rewrite every reference form to the tagged index, leaving anything that
+    # is not a trampoline alone -- `(int32_t)` in particular is all over the
+    # generated code with ordinary values behind it.
+    def by_index(m):
+        name = m.group(1)
+        return f'NFS_FN({index_of[name]})' if name in index_of else m.group(0)
+
+    source = re.sub(r'\(int32_t\)(\w+)\b', by_index, source)
+    source = re.sub(r'NFS_GA\((\w+)\)', by_index, source)
+    source = re.sub(
+        r'push32\((\w+)\)',
+        lambda m: (f'push32(NFS_FN({index_of[m.group(1)]}))'
+                   if m.group(1) in index_of else m.group(0)),
+        source)
+
+    return source, len(ordered)
 
 
 # A generated field declaration inside the _data / _bss structs, e.g.
@@ -154,6 +572,13 @@ def convert_pointer_fields(source):
     Two edits that have to agree with each other: the field declarations, and
     the initialiser that fills them in. Returns (source, fields, casts).
     """
+    # build_arena moves this initialiser and renames its declaration, so on a
+    # second run there is nothing here to find. Say so rather than failing:
+    # the marker is the moved initialiser itself, not the presence of NFS_GA,
+    # which the WORDSIZE replacement defines and would always match.
+    if "static const NfsData nfsDataImage = {" in source:
+        return source, 0, 0
+
     lines = source.split("\n")
     fields = 0
 
@@ -164,19 +589,407 @@ def convert_pointer_fields(source):
 
     source = "\n".join(lines)
 
-    source, casts = INIT_CAST.subn("NFS_GA(", source)
-
-    # Null entries in those same tables are written as a bare `nullptr`, which
-    # no longer converts now that the fields are an integer type. Scope this to
-    # the _data initialiser so genuine pointer uses elsewhere are left alone.
+    # Both rewrites below are scoped to the _data initialiser, and the scoping
+    # is not belt and braces. `(void *)(` and `nullptr` are ordinary C++ that
+    # appears in this script's own replacements too, so rewriting the whole
+    # file turns a pointer the wrapper needs at full width into a truncated
+    # one -- silently, while the base is still zero, and fatally the moment it
+    # is not.
     start = source.find("} static _data")
-    if start != -1:
-        end = source.find("\n};", start)
-        if end != -1:
-            block = source[start:end].replace("nullptr", "0")
-            source = source[:start] + block + source[end:]
+    end = source.find("\n};", start) if start != -1 else -1
+    if start == -1 or end == -1:
+        raise RuntimeError("could not find the _data initialiser to narrow")
+
+    block = source[start:end]
+    # Null entries in those same tables are written as a bare `nullptr`, which
+    # no longer converts now that the fields are an integer type.
+    block, casts = INIT_CAST.subn("NFS_GA(", block)
+    block = block.replace("nullptr", "0")
+    source = source[:start] + block + source[end:]
 
     return source, fields, casts
+
+
+def build_arena(source):
+    """Gather the game's static data into one object, so it can have a base.
+
+    Under base+offset every address the game holds is an offset from one
+    place, which means everything it can reach has to live in one place. This
+    puts _data and _bss there. Nothing else changes yet: the macros still
+    resolve to real addresses and the base is still zero, so this step is
+    supposed to be invisible at run time -- which is exactly what makes it
+    worth doing on its own.
+
+    _data cannot simply move: it has an initialiser, and an arena big enough
+    to hold the heap as well would then be emitted into the binary rather than
+    left as demand-zero pages. So its initialiser becomes a separate image in
+    .rodata, copied into the arena before the game starts.
+
+    The image's own pointer fields are addresses of the arena copy, not of the
+    image, because the macros they go through are redefined first. That is the
+    point: the game must never see the image.
+
+    Returns (source, applied).
+    """
+    if "struct packed NfsBss" in source:
+        return source, False
+
+    starts = [m.start() for m in re.finditer(r'^struct packed \{$', source, re.M)]
+    if len(starts) != 2:
+        raise RuntimeError(f"expected two anonymous static structs, found {len(starts)}")
+
+    bss_end = "} static _bss alignas(4);"
+    data_end = "} static _data alignas(4) = {"
+    if bss_end not in source or data_end not in source:
+        raise RuntimeError("could not find the _data / _bss declarations")
+
+    # Name the two structs, so that offsetof can be taken on them later.
+    source = source[:starts[1]] + source[starts[1]:].replace(
+        "struct packed {", "struct packed NfsData {", 1)
+    source = source[:starts[0]] + source[starts[0]:].replace(
+        "struct packed {", "struct packed NfsBss {", 1)
+
+    source = source.replace(bss_end, "};", 1)
+
+    # The arena has to be declared, and _data/_bss redirected into it, before
+    # the initialiser that follows -- the initialiser reaches its own fields
+    # through those very macros.
+    arena = '''};
+
+/*
+ * The game's world, in one object.
+ *
+ * Everything the game can address has to sit at a known offset from a single
+ * base, because a 32-bit slot is about to stop holding an address and start
+ * holding that offset. This is that single place. The heap joins it later;
+ * for now it is the two blocks of static data, in the order the offsets will
+ * assume.
+ *
+ * Deliberately uninitialised, so it costs address space rather than binary:
+ * _data's initial contents are copied in by nfsArenaInit below.
+ */
+#define NFS_ARENA_HEAP_BYTES (192u * 1024u * 1024u)
+struct NfsArena {
+\t/*
+\t * Nothing lives at offset zero. The game tests addresses against zero to
+\t * mean "none", and it would be right about a thousand times and wrong
+\t * about the field that happened to land first.
+\t */
+\talignas(16) unsigned char reserved[4096];
+\talignas(16) NfsData data;
+\talignas(16) NfsBss bss;
+\talignas(16) unsigned char heap[NFS_ARENA_HEAP_BYTES];
+};
+static NfsArena nfsArena;
+
+/*
+ * The generated code says _data.x and _bss.x in several thousand places, and
+ * every one of them should now mean the arena. Redirecting the two names is
+ * cheaper and far less risky than rewriting the uses, and it keeps taking the
+ * address of a field a constant expression -- which the handful of statics
+ * exported to the wrapper at the end of this file depend on.
+ */
+#define _data (nfsArena.data)
+#define _bss (nfsArena.bss)
+
+/*
+ * The base, and the whole point of the arena.
+ *
+ * A 32-bit slot in this file no longer holds an address; it holds a distance
+ * from here. That is what lets the game run where the low 4 GiB cannot be
+ * mapped at all, which is every arm64 Apple platform and Android.
+ *
+ * Defined here rather than in the wrapper so that the compiler can see it is
+ * the address of a static object and fold the addition into the addressing
+ * mode. It is const because the build is -fno-strict-aliasing: a mutable base
+ * would have to be reloaded after every store the game makes, which measures
+ * 28 instructions against 21 in the game's inner loops.
+ */
+extern "C" const uintptr_t g_nfsBase = (uintptr_t)&nfsArena;
+
+/* The extent of the arena, so that the wrapper can check what it converts. */
+extern "C" const unsigned long g_nfsArenaBytes = (unsigned long)sizeof nfsArena;
+
+/* The heap the wrapper hands out from, which must be inside the arena too. */
+extern "C" unsigned char *const g_nfsHeap = nfsArena.heap;
+extern "C" const unsigned long g_nfsHeapBytes = (unsigned long)sizeof nfsArena.heap;
+
+/*
+ * Where a static lives, as the game now refers to it. Both are compile-time
+ * constants, so the several thousand references cost nothing at run time --
+ * and, unlike the addresses they replace, they need no relocation, which is
+ * what stops the static tables from pinning the executable below 2 GiB.
+ */
+#define NFS_DATA_AT(field) ((GameAddr32)(offsetof(NfsArena, data) + offsetof(NfsData, field)))
+#define NFS_BSS_AT(field) ((GameAddr32)(offsetof(NfsArena, bss) + offsetof(NfsBss, field)))
+
+/* The initial contents of _data, which the game never sees directly. */
+static const NfsData nfsDataImage = {'''
+    source = source.replace(data_end, arena, 1)
+
+    # Close the image and follow it with the copy-in.
+    start = source.index("static const NfsData nfsDataImage = {")
+    end = source.index("\n};", start)
+    init = '''
+
+/*
+ * Puts _data's initial contents where the game will look for them.
+ *
+ * Called from lowMemInit, which the wrapper runs before anything else, rather
+ * than from the game's entry point: the wrapper reads exported statics of its
+ * own accord, and a half-initialised _data reads as plausible rubbish instead
+ * of failing.
+ */
+extern "C" void nfsArenaInit(void)
+{
+\tstatic bool done;
+\tif (done)
+\t\treturn;
+\tdone = true;
+\tnfsArena.data = nfsDataImage;
+}
+'''
+    source = source[:end + len("\n};")] + init + source[end + len("\n};"):]
+    return source, True
+
+
+# A generated accessor for a static, e.g.
+#   #define dword_401010 ((int8_t *)&_data.dword_401010)
+# All 4751 of them have exactly this shape, which is what makes the conversion
+# a rewrite rather than a project.
+STATIC_MACRO = re.compile(
+    r'^#define (\w+) \(\(int8_t \*\)&_(data|bss)\.\1\)$', re.M)
+
+
+def convert_static_macros(source):
+    """Turn the game's static addresses into offsets.
+
+    This is the step the whole exercise is for. Until now a reference to a
+    static was its address; now it is its distance from the arena, resolved
+    against the base by the six accessors. Nothing else about the generated
+    code changes -- the arithmetic the game does on these values (`+ eax * 4`
+    and so on) means the same thing either way.
+
+    The type changes from int8_t * to GameAddr32, which is deliberate: any use
+    that genuinely wanted a pointer now fails to compile instead of quietly
+    truncating. That is the same trick that made narrowing the static tables
+    tractable.
+
+    Returns (source, count).
+    """
+    names = set()
+
+    def rewrite(m):
+        name, where = m.group(1), m.group(2)
+        names.add(name)
+        macro = "NFS_DATA_AT" if where == "data" else "NFS_BSS_AT"
+        return f'#define {name} {macro}({name})'
+
+    source, count = STATIC_MACRO.subn(rewrite, source)
+    if count:
+        source, subscripts = convert_static_subscripts(source, names)
+        count = (count, subscripts)
+    return source, count
+
+
+# A static indexed as an array, e.g. `cmp(byte_4E551A[edx], (int8_t)0)`.
+# The accessor used to be an int8_t *, so this was a byte load; now the name is
+# a number and subscripting it means nothing, which is precisely why the type
+# was changed. The compiler finds every one of these.
+# Deliberately any identifier, with the accessor names checked against the set
+# collected while rewriting them. Guessing the shape of a generated name has
+# already gone wrong twice here -- the tables mix dword_4E5010 with FileName
+# and _IsTable -- and the set is exact where a pattern is a hope.
+SUBSCRIPT = re.compile(r'\b(\w+)\[([^\[\]]+)\]')
+
+# Taking the address of one instead of reading it: `&byte_522390[esi]`, which
+# the generated code uses for lea. The answer is the offset, not the host
+# address the accessor would resolve it to -- storing the latter in a 32-bit
+# slot puts an address where the game expects a distance, and the game then
+# resolves it a second time. That is silently survivable while the base is
+# small enough that base + base + offset still lands inside the arena, and it
+# is a fault the moment the executable is position independent.
+SUBSCRIPT_ADDR = re.compile(r'&(\w+)\[([^\[\]]+)\]')
+SUBSCRIPT_OFFSET_ADDR = re.compile(
+    r'&\((\w+)\s*([+-])\s*([^()\[\]]+)\)\[([^\[\]]+)\]')
+
+# The same thing with the field already displaced, e.g. `(dword_540D94+3)[eax]`,
+# which is how the generated code reaches a byte inside a wider field.
+SUBSCRIPT_OFFSET = re.compile(
+    r'\((\w+)\s*([+-])\s*([^()\[\]]+)\)\[([^\[\]]+)\]')
+
+
+def convert_static_subscripts(source, names):
+    """Rewrite byte-indexing of a static into an offset load.
+
+    `byte_X[edx]` meant the byte edx past _data.X. Said in offsets that is
+    to8i(byte_X + edx), which is the same thing and the same lvalue -- these
+    appear on both sides of assignments and inside cmp() and test().
+
+    Only after the arena: before it lie the struct declarations, where the
+    identical text `name[4]` declares an array rather than indexing one.
+
+    Returns (source, count).
+    """
+    head, sep, tail = source.partition('extern "C" void nfsArenaInit(void)')
+    if not sep:
+        raise RuntimeError("arena must be built before subscripts are converted")
+
+    def rewrite_offset(m):
+        name, sign, disp, index = m.groups()
+        if name not in names:
+            return m.group(0)
+        return f'to8i({name} {sign} ({disp}) + ({index}))'
+
+    def rewrite(m):
+        if m.group(1) not in names:
+            return m.group(0)
+        return f'to8i({m.group(1)} + ({m.group(2)}))'
+
+    def rewrite_addr_offset(m):
+        name, sign, disp, index = m.groups()
+        if name not in names:
+            return m.group(0)
+        return f'({name} {sign} ({disp}) + ({index}))'
+
+    def rewrite_addr(m):
+        if m.group(1) not in names:
+            return m.group(0)
+        return f'({m.group(1)} + ({m.group(2)}))'
+
+    # Address-of forms first, then the displaced read, then the plain one: each
+    # later pattern would otherwise match inside what an earlier one handles.
+    tail, addr_off = SUBSCRIPT_OFFSET_ADDR.subn(rewrite_addr_offset, tail)
+    tail, addr = SUBSCRIPT_ADDR.subn(rewrite_addr, tail)
+    tail, displaced = SUBSCRIPT_OFFSET.subn(rewrite_offset, tail)
+    tail, plain = SUBSCRIPT.subn(rewrite, tail)
+    return head + sep + tail, addr_off + addr + displaced + plain
+
+
+# A read of the simulated stack that does not go through the accessors, e.g.
+#   eax = GetSystemInfo_wrap(*(int32_t *)(esp + 0)); esp += 4;
+# The generated code marshals arguments to wrapper calls this way, dereferencing
+# esp directly. That was the same thing as to32i(esp + 0) while esp held an
+# address; it is a wild pointer once esp holds an offset, and it is the one
+# place the claim "every access goes through six helpers" was not true.
+RAW_STACK = re.compile(r'\*\((int32_t|float) \*\)\((esp[^()]*)\)')
+
+# The same thing in the x86 string instructions, which walk memory through edi
+# and esi: `*(int8_t *)edi = al`.
+RAW_STRING_OP = re.compile(r'\*\((int8_t|int16_t|int32_t) \*\)(edi|esi)\b')
+
+# ...and in the thunks the wrapper is called through, which read the game's
+# simulated stack from outside the class: `*(int32_t *)(game.esp + 4)`.
+RAW_THUNK = re.compile(r'\*\(int32_t \*\)\((game\.esp[^()]*)\)')
+
+WIDTH = {"int8_t": "to8i", "int16_t": "to16i", "int32_t": "to32i", "float": "to32f"}
+
+
+def convert_raw_access(source):
+    """Route every remaining direct dereference through the accessors.
+
+    Three groups reach memory without them, and each was the same thing as the
+    accessor while a game address was a real address:
+
+      * the argument marshalling for wrapper calls, `*(int32_t *)(esp + 0)`
+      * the x86 string instructions, which walk edi and esi
+      * the generated thunks, which read the game's stack as `game.esp + 4`
+
+    Finding them is worth more than the fix: "every access goes through six
+    helpers" is what makes this whole change six functions wide, and it was not
+    quite true. Anything else of this shape will show up as a wild pointer, so
+    the count below is worth watching if the translation is ever regenerated.
+
+    Returns (source, count).
+    """
+    source, stack = RAW_STACK.subn(
+        lambda m: f'{WIDTH[m.group(1)]}({m.group(2)})', source)
+    source, string_ops = RAW_STRING_OP.subn(
+        lambda m: f'{WIDTH[m.group(1)]}({m.group(2)})', source)
+    source, thunks = RAW_THUNK.subn(
+        lambda m: f'Game::to32i({m.group(1)})', source)
+    return source, stack + string_ops + thunks
+
+
+# The game context handed to a wrapper function, e.g.
+#   eax = fetchTrackRecords((int32_t)this, eax, edx);
+CONTEXT_ARG = re.compile(r'\(int32_t\)this\b')
+
+# ...and the declarations those calls go through. Only the first parameter is
+# the context; the rest really are 32-bit game values.
+CONTEXT_DECL = re.compile(
+    r'^extern "C" int32_t (DirectInputCreateA_wrap|DispatchMessageA_wrap|'
+    r'fetchTrackRecords|iSNDdirectserve_)\(int32_t arg0', re.M)
+
+
+def convert_context_pointer(source):
+    """Hand the wrapper the game context as a pointer, not as a number.
+
+    Six call sites pass `(int32_t)this`. That was lossless while the context
+    lived below 2 GiB, and the wrapper -- whose parameter is `void *this` --
+    got the right address back by zero extension. Under base+offset it is not
+    an address any more, and the wrapper needs the real one: it uses the
+    context to call back into the game.
+
+    So the truncation goes, and the declaration says what it always meant.
+
+    Returns (source, calls, decls).
+    """
+    source, decls = CONTEXT_DECL.subn(
+        lambda m: f'extern "C" int32_t {m.group(1)}(void *arg0', source)
+    if not decls:
+        return source, 0, 0
+    source, calls = CONTEXT_ARG.subn('this', source)
+    return source, calls, decls
+
+
+def swap_window_thread(source):
+    """Create the window on the first thread, which is the only one macOS will.
+
+    The game starts its own code and then creates its window from within it.
+    That is fine everywhere but macOS, where Cocoa ignores a window created on
+    any other thread -- and the wrapper then reports the failure in a message
+    box, which is another window, from the same wrong thread, so the process
+    hangs there rather than saying anything.
+
+    The translation already has the swapped arrangement behind an ifdef; it had
+    simply never been compiled, so it still hands the wrapper a function
+    address. It gets an index and the game's context instead, which is what the
+    wrapper can call back through.
+
+    This is not a CHANGES entry because build_function_table rewrites the cast
+    below into an index, so the applied form cannot be recognised by looking
+    for what was written.
+
+    Returns (source, applied).
+    """
+    # The comment, not the code: build_function_table rewrites the call's
+    # argument, and the last two markers chosen from the code went stale the
+    # moment the emitted form changed.
+    marker = "Not call(): that dispatches through the game's own table"
+    if marker in source:
+        return source, False
+
+    old = "\tpush32(doStart);\n\tcall(WrapperStartInThread);"
+    if old not in source:
+        raise RuntimeError("could not find the macOS window-thread entry")
+
+    new = (
+        "\t/*\n"
+        "\t * Not call(): that dispatches through the game's own table, and this\n"
+        "\t * is the wrapper. The game's code goes over as a table index with the\n"
+        "\t * context it needs, because an index is what the wrapper can call\n"
+        "\t * back through. build_function_table rewrites the cast.\n"
+        "\t *\n"
+        "\t * And a context of its own, as every other game thread gets: the\n"
+        "\t * context is the simulated CPU, so sharing one between two threads\n"
+        "\t * shares one esp between them, and they overwrite each other's\n"
+        "\t * stack. Never freed; it lives as long as the process.\n"
+        "\t */\n"
+        "\tGame *game_thread = new (lowMemAlloc(sizeof(Game))) Game();\n"
+        "\tWrapperStartInThread(game_thread, (int32_t)doStart);"
+    )
+    return source.replace(old, new, 1), True
 
 
 def main():
@@ -221,6 +1034,54 @@ def main():
         applied.append("static pointer tables")
     else:
         print("  already patched: static pointer tables")
+
+    # Must run before the function table, which anchors itself on the last
+    # trampoline, and after the tables are narrowed, which locates the _data
+    # initialiser by the declaration this rewrites.
+    source, swapped = swap_window_thread(source)
+    if swapped:
+        print("  patched:         macOS window thread")
+        applied.append("window thread")
+    else:
+        print("  already patched: macOS window thread")
+
+    source, arena = build_arena(source)
+    if arena:
+        print("  patched:         static data into the arena")
+        applied.append("arena")
+    else:
+        print("  already patched: static data into the arena")
+
+    source, macros = convert_static_macros(source)
+    if macros:
+        print(f"  patched:         static addresses to offsets "
+              f"({macros[0]} accessors, {macros[1]} subscripts)")
+        applied.append("static offsets")
+    else:
+        print("  already patched: static addresses to offsets")
+
+    source, raw = convert_raw_access(source)
+    if raw:
+        print(f"  patched:         direct memory reads through the accessors ({raw} sites)")
+        applied.append("raw stack reads")
+    else:
+        print("  already patched: direct memory reads through the accessors")
+
+    source, calls, decls = convert_context_pointer(source)
+    if decls:
+        print(f"  patched:         game context as a pointer ({calls} calls, {decls} declarations)")
+        applied.append("context pointer")
+    else:
+        print("  already patched: game context as a pointer")
+
+    # Must run after the tables are narrowed: it rewrites NFS_GA(sub_X), which
+    # only exists once those initialisers have been converted.
+    source, functions = build_function_table(source)
+    if functions:
+        print(f"  patched:         function dispatch table ({functions} functions)")
+        applied.append("function dispatch table")
+    else:
+        print("  already patched: function dispatch table")
 
     if check_only:
         print("\nUp to date." if not applied else "\nWould apply the changes above.")
